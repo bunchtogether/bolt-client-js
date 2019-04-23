@@ -1,0 +1,67 @@
+{
+  "name": "@bunchtogether/bolt-client",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "repository": "https://github.com/bunchtogether/bolt-client-js.git",
+  "author": "johnwehr@bunchtogether.com",
+  "scripts": {
+    "build": "rm -rf ./dist; flow-remove-types ./src --out-dir ./dist && flow-copy-source ./src ./dist",
+    "flow-typed": "./node_modules/.bin/flow-typed install --overwrite",
+    "test": "yarn lint && yarn test:js",
+    "test:js": "cross-env NODE_ENV=test jest --runInBand --detectOpenHandles tests",
+    "lint": "npm run lint:js && npm run lint:flow",
+    "lint:js": "eslint -c ./.eslintrc --no-eslintrc --fix --cache .",
+    "lint:flow": "flow --show-all-errors",
+    "coverage": "codecov",
+    "start-pre-commit": "git stash -q --keep-index",
+    "end-pre-commit": "git add -u && git stash pop -q",
+    "documentation": "documentation readme src/index.js --section='API'"
+  },
+  "pre-commit": [
+    "lint",
+    "start-pre-commit",
+    "build",
+    "documentation",
+    "end-pre-commit"
+  ],
+  "jest": {
+    "coverageDirectory": "./coverage/",
+    "collectCoverage": true,
+    "collectCoverageFrom": [
+      "src/*.js",
+      "src/**/*.js"
+    ],
+    "transform": {
+      "^.+\\.js(?:\\.flow)?$": "jest-flow-transform"
+    }
+  },
+  "devDependencies": {
+    "babel-eslint": "^9.0.0",
+    "codecov": "^3.3.0",
+    "cross-env": "^5.2.0",
+    "documentation": "^9.3.1",
+    "eslint": "^5.16.0",
+    "eslint-config-bunchtogether": "^1.1.6",
+    "eslint-plugin-flowtype": "^3.5.1",
+    "eslint-plugin-flowtype-errors": "^4.1.0",
+    "eslint-plugin-import": "^2.16.0",
+    "eslint-plugin-jest": "^22.4.1",
+    "eslint-plugin-jsx-a11y": "^6.2.1",
+    "eslint-plugin-react": "^7.12.4",
+    "expect": "^24.7.0",
+    "exports-loader": "^0.7.0",
+    "flow-bin": "^0.96.0",
+    "flow-copy-source": "^2.0.3",
+    "flow-remove-types": "^1.2.3",
+    "flow-typed": "^2.5.1",
+    "jest": "^24.7.0",
+    "jest-diff": "^24.7.0",
+    "jest-flow-transform": "^1.0.1",
+    "pre-commit": "^1.2.2",
+    "whatwg-fetch": "^3.0.0"
+  },
+  "dependencies": {
+    "ipfs": "^0.35.0",
+    "libp2p-pnet": "^0.1.0"
+  }
+}
