@@ -3,14 +3,13 @@
 import Protector from 'libp2p-pnet';
 import IPFS from 'ipfs';
 
-
 /**
  * Class representing a Bolt Client
  */
 class Client extends IPFS {
   constructor(protocol: string, host: string, port: number, swarmKey: string, bootstrap?: Array<string> = []) {
     const config = {
-      repo: 'ipfs',
+      repo: 'bolt',
       EXPERIMENTAL: {
         pubsub: true,
       },
