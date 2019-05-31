@@ -6,19 +6,8 @@
 
 #### Table of Contents
 
--   [Client](#client)
-    -   [Parameters](#parameters)
+-   [BoltClient](#boltclient)
 
-### Client
-
-**Extends IPFS**
+### BoltClient
 
 Class representing a Bolt Client
-
-#### Parameters
-
--   `protocol` **[string](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/String)** 
--   `host` **[string](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/String)** 
--   `port` **[number](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Number)** 
--   `swarmKey` **[string](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/String)** 
--   `bootstrap` **[Array](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Array)&lt;[string](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/String)>**  (optional, default `[]`)

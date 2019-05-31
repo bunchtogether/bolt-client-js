@@ -1,34 +1,592 @@
 // @flow
 
+import type { Readable } from 'stream';
+
 import Protector from 'libp2p-pnet';
-import IPFS from 'ipfs';
+import IpfsObservedRemoveMap from 'ipfs-observed-remove/dist/map';
+import Stream from 'readable-stream';
+import pump from 'pump';
+import URL from 'url-parse';
+import m3u8 from '@chovy/m3u8';
+import request from 'request';
+import multibase from 'multibase';
+import LruCache from 'lru-cache';
+
+const enablePrefetchCache = new LruCache({ max: 500, maxAge: 30000 });
+const disablePrefetchCache = new LruCache({ max: 500, maxAge: 30000 });
+
+const enablePrefetch = (path) => {
+  enablePrefetchCache.set(path, true);
+};
+
+const disablePrefetch = (path) => {
+  disablePrefetchCache.set(path, true);
+};
+
+const shouldPrefetch = (path:string) => enablePrefetchCache.has(path) && !disablePrefetchCache.has(path);
+
+const timeCache = new LruCache({ max: 500 });
+const logTime = (message: string, path: string) => {
+  if (path.indexOf('m3u8') !== -1) {
+    return;
+  }
+  let start = timeCache.get(path);
+  if (!start) {
+    start = Date.now();
+    timeCache.set(path, start);
+    console.log(path.split('/').pop(), message, start);
+  } else {
+    console.log(path.split('/').pop(), message, start, Date.now(), `+${Date.now() - start}`);
+    timeCache.del(path);
+  }
+};
+
+const mergeUint8Arrays = (arrays) => {
+  let length = 0;
+  arrays.forEach((item) => {
+    length += item.length;
+  });
+  const merged = new Uint8Array(length);
+  let offset = 0;
+  arrays.forEach((item) => {
+    merged.set(item, offset);
+    offset += item.length;
+  });
+  return merged;
+};
+
+const { performance } = window;
+
+const isFqdmRegex = /^(?!:\/\/)(?!.{256,})(([a-z0-9][a-z0-9_-]*?\.)+?[a-z]{2,16}?)$/i;
+
+const isFqdm = (hostname: string) => isFqdmRegex.test(hostname);
+
+export class FilesError extends Error {
+  code:number;
+  constructor(message:string, code:number) {
+    super(message);
+    this.code = code;
+  }
+}
+
+export type MetadataType = {
+  peerId: string,
+  hash: string,
+  size: number,
+  expires?: string,
+  skipPin?: boolean,
+  created: number,
+  mimetype: string
+};
+
+const ipfsLoadPromise = (async () => {
+  for (let i = 0; i < 10; i += 1) {
+    if (window) {
+      const { Ipfs } = window;
+      if (Ipfs) {
+        return Ipfs;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100)); // eslint-disable-line no-loop-func
+  }
+  let j = 0;
+  while (true) {
+    j += 1;
+    if (window) {
+      const { Ipfs } = window;
+      if (Ipfs) {
+        return Ipfs;
+      }
+    }
+    if (j < 8) {
+      await new Promise((resolve) => setTimeout(resolve, 1000 * j * j)); // eslint-disable-line no-loop-func
+    } else {
+      await new Promise((resolve) => setTimeout(resolve, 1000 * 60)); // eslint-disable-line no-loop-func
+    }
+  }
+  throw new Error('Unable to load IPFS'); // eslint-disable-line no-unreachable
+})();
+
+
+class BoltLoader {
+  file: Readable;
+  timeout: TimeoutID;
+  config: Object;
+  url: string;
+
+  static boltClient = {
+    getProxyPath: (path:string) => { // eslint-disable-line no-unused-vars
+      throw new Error('Not implemented');
+    },
+    getProxyUrl: (urlString:string) => { // eslint-disable-line no-unused-vars
+      throw new Error('Not implemented');
+    },
+    getStream: (path:string) => { // eslint-disable-line no-unused-vars
+      throw new Error('Not implemented');
+    },
+    parseM3u8Stream: (file: Readable) => { // eslint-disable-line no-unused-vars
+      throw new Error('Not implemented');
+    },
+  };
+
+  constructor(config:Object) {
+    this.config = config;
+  }
+
+  load(context: {url: string, responseType:string, type?: string}, config:{timeout: number}, callbacks: {onSuccess: Function, onProgress: Function, onError: Function, onTimeout: Function}) {
+    const boltClient = this.constructor.boltClient;
+    const start = Date.now();
+    const stats:Object = {
+      trequest: performance.now(),
+      loaded: 0,
+      bw: 0,
+      retry: 0,
+    };
+    const { onSuccess, onError, onTimeout, onProgress } = callbacks;
+    const { url, responseType } = context;
+    this.url = url;
+    const proxyPath = boltClient.getProxyPath(url);
+    const proxyUrl = boltClient.getProxyUrl(url);
+    const chunks = [];
+    const file = boltClient.getStream(proxyPath);
+    this.file = file;
+    if (context.type === 'level') {
+      enablePrefetch(proxyPath);
+      boltClient.parseM3u8Stream(file);
+    }
+    const timeout = setTimeout(() => {
+      file.removeListener('end', handleEnd);
+      file.removeListener('data', handleData);
+      file.removeListener('error', handleError);
+      onTimeout(stats, context, null);
+    }, config.timeout);
+    this.timeout = timeout;
+    const handleData = (buffer:Buffer) => {
+      const seconds = (Date.now() - start) / 1000;
+      if (!stats.tfirst) {
+        stats.tfirst = performance.now();
+      }
+      stats.loaded += buffer.length;
+      stats.bw = stats.loaded * 8 / seconds;
+      if (onProgress) {
+        onProgress(stats, context, null, boltClient);
+      }
+      chunks.push(buffer);
+    };
+    const handleEnd = () => {
+      clearTimeout(timeout);
+      file.removeListener('end', handleEnd);
+      file.removeListener('data', handleData);
+      file.removeListener('error', handleError);
+      const arrayBuffer = mergeUint8Arrays(chunks);
+      stats.total = arrayBuffer.length;
+      if (responseType === 'arraybuffer') {
+        onSuccess({ url: proxyUrl, data: arrayBuffer }, stats, context, boltClient);
+      } else {
+        onSuccess({ url: proxyUrl, data: Buffer.from(arrayBuffer).toString('utf8') }, stats, context, boltClient);
+      }
+      delete this.file;
+    };
+    const handleError = (error) => {
+      clearTimeout(timeout);
+      file.removeListener('end', handleEnd);
+      file.removeListener('data', handleData);
+      file.removeListener('error', handleError);
+      console.log(`Error loading ${url}:`);
+      console.error(error);
+      onError({ code: 500, text: error.message }, context);
+      delete this.file;
+    };
+    file.on('data', handleData);
+    file.on('end', handleEnd);
+    file.on('error', handleError);
+  }
+
+  abort() {
+    clearTimeout(this.timeout);
+    if (this.file) {
+      this.file.removeAllListeners();
+      delete this.file;
+    }
+  }
+  destroy() {
+    delete this.config;
+    this.abort();
+  }
+}
+
+const PLAYLIST_MIMETYPES = new Set(['application/vnd.apple.mpegurl', 'application/x-mpegurl']);
+
+const isPlaylistMimetype = (mimetype: string) => PLAYLIST_MIMETYPES.has(mimetype.toLowerCase());
 
 /**
  * Class representing a Bolt Client
  */
-class Client extends IPFS {
-  constructor(protocol: string, host: string, port: number, swarmKey: string, bootstrap?: Array<string> = []) {
+class BoltClient {
+  ipfs: Object;
+  metadataOrMap: IpfsObservedRemoveMap<string, MetadataType>;
+  agent: Object;
+  protocol: string;
+  host: string;
+  port: number;
+  idPromise:Promise<string>;
+  proxyBytes: number;
+  ipfsBytes: number;
+  proxyTime: number;
+  ipfsTime: number;
+  clusterId: string;
+  type: string;
+  playlistUpdateTimeouts: Map<string, TimeoutID>;
+
+  constructor() {
+    this.proxyBytes = 0;
+    this.ipfsBytes = 0;
+    this.proxyTime = 0;
+    this.ipfsTime = 0;
+    this.playlistUpdateTimeouts = new Map();
+    let activePeerCount = 0;
+    setInterval(() => {
+      if (this.proxyBytes > 0 || this.ipfsBytes > 0 || this.proxyTime > 0 || this.ipfsTime > 0) {
+        console.log('Stats:');
+      }
+      if (this.proxyBytes > 0 || this.ipfsBytes > 0) {
+        const percentage = Math.round(10000 * this.ipfsBytes / (this.proxyBytes + this.ipfsBytes)) / 100;
+        console.log(`\t${percentage}% P2P (bytes)`);
+      }
+      if (this.proxyTime > 0) {
+        const kbps = Math.round(10 * (this.proxyBytes * 8) / (1024 * this.proxyTime / 1000)) / 10;
+        console.log(`\tProxy speed: ${kbps} Kbs`);
+      }
+      if (this.ipfsTime > 0) {
+        const kbps = Math.round(10 * (this.ipfsBytes * 8) / (1024 * this.ipfsTime / 1000)) / 10;
+        console.log(`\tP2P speed: ${kbps} Kbs`);
+      }
+      if (this.ipfs) {
+        this.ipfs.swarm.peers().then((peerInfos) => {
+          if (peerInfos.length !== activePeerCount) {
+            activePeerCount = peerInfos.length;
+            console.log(`${activePeerCount} peers`);
+          }
+        }).catch((error) => {
+          console.log('Unable to get swarm peers');
+          console.error(error);
+        });
+      }
+    }, 10000);
+    const storedServerSettings = this.getStoredServerSettings();
+    if (storedServerSettings.host && storedServerSettings.protocol && storedServerSettings.port) {
+      this.setServer(storedServerSettings.protocol, storedServerSettings.host, storedServerSettings.port);
+    }
+  }
+
+  get hlsJsLoader() {
+    const boltClient = this;
+    class C extends BoltLoader {
+      static boltClient = boltClient;
+    }
+    return C;
+  }
+
+  getStoredServerSettings() {
+    const storedServerSettingsString = localStorage.getItem('BOLT_SERVER_SETTINGS');
+    if (!storedServerSettingsString) {
+      return {};
+    }
+    try {
+      return JSON.parse(storedServerSettingsString);
+    } catch (error) {
+      console.log('Unable to parse stored server settings');
+      console.error(error);
+    }
+    localStorage.removeItem('BOLT_SERVER_SETTINGS');
+    localStorage.removeItem('BOLT_SWARM_SETTINGS');
+    return {};
+  }
+
+  getStoredSwarmSettings() {
+    const storedSwarmSettingsString = localStorage.getItem('BOLT_SWARM_SETTINGS');
+    if (!storedSwarmSettingsString) {
+      return {};
+    }
+    try {
+      return JSON.parse(storedSwarmSettingsString);
+    } catch (error) {
+      console.log('Unable to parse stored swarm settings');
+      console.error(error);
+    }
+    localStorage.removeItem('BOLT_SERVER_SETTINGS');
+    localStorage.removeItem('BOLT_SWARM_SETTINGS');
+    return {};
+  }
+
+  setServer(protocol: string, host: string, port: number) {
+    this.protocol = protocol;
+    this.host = host;
+    this.port = port;
+    const storedServerSettings = this.getStoredServerSettings();
+    if (storedServerSettings.protocol !== protocol || storedServerSettings.host !== host || storedServerSettings.port !== port) {
+      localStorage.setItem('BOLT_SERVER_SETTINGS', JSON.stringify({ protocol, host, port }));
+      if (this.ipfs) {
+        this.restartIpfs();
+      }
+    }
+  }
+
+  base32Hostname(id: string) {
+    const base32Id = multibase.encode('base32', multibase.decode(`z${id}`)).slice(1).toString();
+    return `p-${base32Id}.${this.host}`;
+  }
+
+  async restartIpfs() {
+    console.log('Restarting IPFS');
+    const ipfs = this.ipfs;
+    delete this.ipfs;
+    if (!ipfs) {
+      return;
+    }
+    await ipfs.stop();
+    this.startIpfs();
+  }
+
+  async startIpfs() {
+    if (this.ipfs) {
+      throw new Error('IPFS already started');
+    }
+    let { id, swarmKey, peerIds, clusterId } = this.getStoredSwarmSettings();
+    if (!id || !swarmKey || !peerIds || !clusterId) {
+      const swarmSettings = await this.getJson('/api/1.0/swarm');
+      id = swarmSettings.id;
+      swarmKey = swarmSettings.swarmKey;
+      peerIds = swarmSettings.peerIds;
+      clusterId = swarmSettings.clusterId;
+      localStorage.setItem('BOLT_SWARM_SETTINGS', JSON.stringify({ id, swarmKey, peerIds, clusterId }));
+    } else {
+      console.log('Using saved swarm settings');
+      this.getJson('/api/1.0/swarm').then(async (swarmSettings) => {
+        if (swarmSettings.id !== id || swarmSettings.swarmKey !== swarmKey || swarmSettings.clusterId !== clusterId) {
+          this.restartIpfs();
+        }
+        if (this.ipfs && isFqdm(this.host)) {
+          for (const peerId of swarmSettings.peerIds) {
+            this.ipfs.swarm.connect(`/dns4/${this.base32Hostname(peerId)}/tcp/${this.port}/${wrtcProtocol}/ipfs/${peerId}`).catch((error) => {
+              console.log(`Unable to connect to swarm peer ${peerId}`);
+              console.error(error);
+            });
+          }
+        }
+      }).catch((error) => {
+        console.log('Unable to get swarm settings');
+        console.error(error);
+      });
+    }
+    this.clusterId = clusterId;
+    const wrtcProtocol = this.protocol === 'https' ? 'wss' : 'ws';
+    const swarmAddresses = [];
+    const bootstrap = [];
+    if (isFqdm(this.host)) {
+      swarmAddresses.push(`/dns4/${this.base32Hostname(id)}/tcp/${this.port}/${wrtcProtocol}/p2p-webrtc-star`);
+      bootstrap.push(`/dns4/${this.base32Hostname(id)}/tcp/${this.port}/${wrtcProtocol}/ipfs/${id}`);
+      for (const peerId of peerIds) {
+        bootstrap.push(`/dns4/${this.base32Hostname(peerId)}/tcp/${this.port}/${wrtcProtocol}/ipfs/${peerId}`);
+      }
+    } else {
+      swarmAddresses.push(`/dns4/${this.host}/tcp/${this.port}/${wrtcProtocol}/p2p-webrtc-star`);
+      bootstrap.push(`/dns4/${this.host}/tcp/${this.port}/${wrtcProtocol}/ipfs/${id}`);
+    }
+    const IPFS = await ipfsLoadPromise;
     const config = {
       repo: 'bolt',
+      preload: {
+        enabled: false,
+      },
+      relay: {
+        enabled: true,
+        hop: {
+          enabled: true,
+          active: true,
+        },
+      },
       EXPERIMENTAL: {
         pubsub: true,
+        sharding: true,
       },
       libp2p: {
         modules: {
-          connProtector: new Protector(swarmKey)
-        }
+          connProtector: new Protector(swarmKey),
+        },
       },
       config: {
         Addresses: {
-          Swarm: [
-            `/dns4/${host}/tcp/${port}/${protocol}/p2p-webrtc-star`,
-          ],
+          Swarm: swarmAddresses,
         },
         Bootstrap: bootstrap,
       },
     };
-    super(config);
+    const ipfs = new IPFS(config);
+    ipfs.on('error', (error) => {
+      console.log('IPFS error:');
+      console.error(error);
+    });
+    await new Promise((resolve, reject) => {
+      const handleReady = () => {
+        ipfs.removeListener('ready', handleReady);
+        ipfs.removeListener('error', handleError);
+        resolve();
+      };
+      const handleError = (error) => {
+        ipfs.removeListener('ready', handleReady);
+        ipfs.removeListener('error', handleError);
+        reject(error);
+      };
+      ipfs.on('ready', handleReady);
+      ipfs.on('error', handleError);
+    });
+    this.idPromise = ipfs.id().then((ipfsResponse) => ipfsResponse.id);
+    this.ipfs = ipfs;
+    this.metadataOrMap = new IpfsObservedRemoveMap(ipfs, `${clusterId}:files`, [], { disableSync: true });
+    this.metadataOrMap.on('set', (path, { hash, mimetype }) => {
+      logTime('METADATA', path);
+      if (shouldPrefetch(path)) {
+        const stream = this.ipfs.getReadableStream(hash);
+        if (isPlaylistMimetype(mimetype)) {
+          const file = new Stream.PassThrough({ objectMode: true });
+          stream.on('error', (error) => {
+            console.log(`Unable to get stream for ${path}:`);
+            console.error(error);
+            file.destroy(error);
+          });
+          stream.on('data', ({ content }) => {
+            if (file.writable) {
+              pump(content, file);
+            }
+            stream.end();
+          });
+          this.parseM3u8Stream(file);
+        }
+      }
+    });
+  }
+
+  parseM3u8Stream(stream: Readable) {
+    const parser = m3u8.createStream();
+    stream.pipe(parser);
+    parser.on('item', (item) => {
+      const itemPath = item.get('uri').slice(1);
+      enablePrefetch(itemPath);
+    });
+  }
+
+  getProxyUrl(urlString:string) {
+    const proxyPath = this.getProxyPath(urlString);
+    return `${this.protocol}://${this.host}:${this.port}/${proxyPath}`;
+  }
+
+  getProxyPath(urlString:string) {
+    const url = new URL(urlString);
+    if (url.pathname.indexOf('origin/') !== -1) {
+      return `${url.pathname.slice(1)}${url.query ? `?${url.query}` : ''}`;
+    }
+    return `origin/${url.hostname}${url.pathname}${url.query ? `?${url.query}` : ''}`;
+  }
+
+  getJson(path:string):Promise<Object> {
+    return new Promise((resolve, reject) => {
+      request.get(`${this.protocol}://${this.host}:${this.port}${path}`, (error, response, body) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(JSON.parse(body));
+        }
+      });
+    });
+  }
+
+  getProxyStream(path:string):Readable {
+    const req = request.get(`${this.protocol}://${this.host}:${this.port}/${path}`);
+    const file = new Stream.PassThrough({ objectMode: true });
+    const start = Date.now();
+    pump(req, file);
+    file.on('end', () => {
+      this.proxyTime += Date.now() - start;
+    });
+    file.on('data', (data:Uint8Array) => {
+      this.proxyBytes += data.length;
+    });
+    req.on('response', (response) => {
+      if (isPlaylistMimetype(response.caseless.get('content-type'))) {
+        disablePrefetch(path);
+      }
+    });
+    if (this.ipfs) {
+      const ingest = new Stream.PassThrough({ objectMode: true });
+      pump(req, ingest);
+      this.ipfs.add({
+        path: null,
+        content: ingest,
+      }, {
+        wrapWithDirectory: false,
+        recursive: false,
+        pin: false,
+      }, (error) => {
+        if (error) {
+          console.log(`Unable to ingest ${path}`);
+          console.error(error);
+        }
+      });
+    }
+    return file;
+  }
+
+  getStream(path:string):Readable {
+    if (!this.metadataOrMap) {
+      logTime('MISS:MAP', path);
+      if (path.indexOf('origin/') === 0) {
+        return this.getProxyStream(path);
+      }
+      throw new FilesError(`Unable to load ${path} metadata map does not exist`, 404);
+    }
+    const metadata = this.metadataOrMap.get(path);
+    if (!metadata) {
+      logTime('MISS:METADATA', path);
+      if (path.indexOf('origin/') === 0) {
+        return this.getProxyStream(path);
+      }
+      throw new FilesError(`Unable to find ${path}`, 404);
+    }
+    if (!isPlaylistMimetype(metadata.mimetype)) {
+      disablePrefetch(path);
+    }
+    const expires = metadata.expires;
+    if (expires) {
+      if (new Date(expires) < new Date()) {
+        logTime('MISS:EXPIRED', path);
+        if (path.indexOf('origin/') === 0) {
+          return this.getProxyStream(path);
+        }
+        throw new FilesError(`Expired ${path}`, 404);
+      }
+    }
+    logTime('HIT', path);
+    const stream = this.ipfs.getReadableStream(metadata.hash);
+    const file = new Stream.PassThrough({ objectMode: true });
+    const start = Date.now();
+    file.on('end', () => {
+      this.ipfsTime += Date.now() - start;
+    });
+    file.on('data', (data:Uint8Array) => {
+      this.ipfsBytes += data.length;
+    });
+    stream.on('error', (error) => {
+      console.log(`Unable to get stream for ${path}:`);
+      console.error(error);
+      file.destroy(error);
+    });
+    stream.on('data', ({ content }) => {
+      pump(content, file);
+      stream.end();
+    });
+    return file;
   }
 }
 
-export default Client;
+export default new BoltClient();
