@@ -5,9 +5,10 @@
 import Protector from 'libp2p-pnet';
 import IpfsObservedRemoveMap from 'ipfs-observed-remove/dist/map';
 import Stream from 'readable-stream';
+import streamToString from 'stream-to-string';
 import pump from 'pump';
 import URL from 'url-parse';
-import m3u8 from '@chovy/m3u8';
+import { Parser } from 'm3u8-parser';
 import request from 'request';
 import multibase from 'multibase';
 import LruCache from 'lru-cache';
@@ -467,13 +468,16 @@ class BoltClient {
     });
   }
 
-  parseM3u8Stream(stream          ) {
-    const parser = m3u8.createStream();
-    stream.pipe(parser);
-    parser.on('item', (item) => {
-      const itemPath = item.get('uri').slice(1);
-      enablePrefetch(itemPath);
-    });
+  async parseM3u8Stream(stream          ) {
+    const manifest = await streamToString(stream);
+    const parser = new Parser();
+    parser.push(manifest);
+    parser.end();
+    if (parser && parser.manifest && parser.manifest.segments) {
+      for (const segment of parser.manifest.segments) {
+        enablePrefetch(segment.uri.slice(1));
+      }
+    }
   }
 
   getProxyUrl(urlString       ) {
