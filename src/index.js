@@ -390,10 +390,9 @@ class BoltClient {
       for (const peerId of peerIds) {
         bootstrap.push(`/dns4/${this.base32Hostname(peerId)}/tcp/${this.port}/${wrtcProtocol}/ipfs/${peerId}`);
       }
-    } else {
-      swarmAddresses.push(`/dns4/${this.host}/tcp/${this.port}/${wrtcProtocol}/p2p-webrtc-star`);
-      bootstrap.push(`/dns4/${this.host}/tcp/${this.port}/${wrtcProtocol}/ipfs/${id}`);
     }
+    swarmAddresses.push(`/dns4/${this.host}/tcp/${this.port}/${wrtcProtocol}/p2p-webrtc-star`);
+    bootstrap.push(`/dns4/${this.host}/tcp/${this.port}/${wrtcProtocol}/ipfs/${id}`);
     const IPFS = await ipfsLoadPromise;
     const config = {
       repo: 'bolt',
