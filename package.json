@@ -1,6 +1,6 @@
 {
   "name": "@bunchtogether/bolt-client",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "main": "dist/index.js",
   "repository": "https://github.com/bunchtogether/bolt-client-js.git",
   "author": "johnwehr@bunchtogether.com",

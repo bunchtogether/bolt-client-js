@@ -238,6 +238,7 @@ class BoltClient {
                     
                
                                                  
+                           
 
   constructor() {
     this.proxyBytes = 0;
@@ -327,9 +328,7 @@ class BoltClient {
     const storedServerSettings = this.getStoredServerSettings();
     if (storedServerSettings.protocol !== protocol || storedServerSettings.host !== host || storedServerSettings.port !== port) {
       localStorage.setItem('BOLT_SERVER_SETTINGS', JSON.stringify({ protocol, host, port }));
-      if (this.ipfs) {
-        this.restartIpfs();
-      }
+      this.restartIpfs();
     }
   }
 
@@ -340,19 +339,41 @@ class BoltClient {
 
   async restartIpfs() {
     console.log('Restarting IPFS');
+    const ipfsReady = this.ipfsReady;
+    if (ipfsReady) {
+      try {
+        await ipfsReady;
+      } catch (error) {
+        console.log('IPFS failed to start before restart process, continuing');
+      }
+    }
     const ipfs = this.ipfs;
     delete this.ipfs;
-    if (!ipfs) {
-      return;
+    if (ipfs) {
+      await ipfs.stop();
     }
-    await ipfs.stop();
     this.startIpfs();
   }
 
-  async startIpfs() {
+  startIpfs() {
+    if (this.ipfsReady) {
+      return this.ipfsReady;
+    }
+    const ipfsReady = this._startIpfs(); // eslint-disable-line no-underscore-dangle
+    ipfsReady.then(() => {
+      delete this.ipfsReady;
+    }).catch(() => {
+      delete this.ipfsReady;
+    });
+    this.ipfsReady = ipfsReady;
+    return ipfsReady;
+  }
+
+  async _startIpfs() {
     if (this.ipfs) {
       throw new Error('IPFS already started');
     }
+    const IPFS = await ipfsLoadPromise;
     let { id, swarmKey, peerIds, clusterId } = this.getStoredSwarmSettings();
     if (!id || !swarmKey || !peerIds || !clusterId) {
       const swarmSettings = await this.getJson('/api/1.0/swarm');
@@ -365,6 +386,7 @@ class BoltClient {
       console.log('Using saved swarm settings');
       this.getJson('/api/1.0/swarm').then(async (swarmSettings) => {
         if (swarmSettings.id !== id || swarmSettings.swarmKey !== swarmKey || swarmSettings.clusterId !== clusterId) {
+          localStorage.setItem('BOLT_SWARM_SETTINGS', JSON.stringify(swarmSettings));
           this.restartIpfs();
         }
         if (this.ipfs && isFqdm(this.host)) {
@@ -393,7 +415,6 @@ class BoltClient {
     }
     swarmAddresses.push(`/dns4/${this.host}/tcp/${this.port}/${wrtcProtocol}/p2p-webrtc-star`);
     bootstrap.push(`/dns4/${this.host}/tcp/${this.port}/${wrtcProtocol}/ipfs/${id}`);
-    const IPFS = await ipfsLoadPromise;
     const config = {
       repo: 'bolt',
       preload: {
@@ -466,17 +487,33 @@ class BoltClient {
       }
     });
     await this.runGarbageCollection();
-    setInterval(() => {
-      this.runGarbageCollection();
-    }, 30 * 60 * 1000);
+    // $FlowFixMe
+    if ('storage' in navigator && 'estimate' in navigator.storage) {
+      setInterval(() => {
+        this.runGarbageCollection();
+      }, 60 * 1000);
+    } else {
+      setInterval(() => {
+        this.runGarbageCollection();
+      }, 60 * 60 * 1000);
+    }
   }
 
   async runGarbageCollection() {
-    console.log('Running IPFS garbage collection');
     const ipfs = this.ipfs;
     if (!ipfs) {
       return;
     }
+    // $FlowFixMe
+    if ('storage' in navigator && 'estimate' in navigator.storage) {
+      // $FlowFixMe
+      const { usage, quota } = await navigator.storage.estimate();
+      console.log(`Using ${Math.round(10000 * usage / quota) / 100}% of ${Math.round(100 * quota / 1024 / 1024 / 1024) / 100} GB storage quota`);
+      if (usage < 5368709120 && (usage / quota) < 0.5) {
+        return;
+      }
+    }
+    console.log('Running IPFS garbage collection');
     try {
       await ipfs.repo.gc();
     } catch (error) {
