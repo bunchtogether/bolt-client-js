@@ -465,6 +465,24 @@ class BoltClient {
         }
       }
     });
+    await this.runGarbageCollection();
+    setInterval(() => {
+      this.runGarbageCollection();
+    }, 30 * 60 * 1000);
+  }
+
+  async runGarbageCollection() {
+    console.log('Running IPFS garbage collection');
+    const ipfs = this.ipfs;
+    if (!ipfs) {
+      return;
+    }
+    try {
+      await ipfs.repo.gc();
+    } catch (error) {
+      console.log('Unable to run IPFS garbage collection');
+      console.error(error);
+    }
   }
 
   async parseM3u8Stream(stream: Readable) {
