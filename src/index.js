@@ -16,6 +16,8 @@ import LruCache from 'lru-cache';
 const enablePrefetchCache = new LruCache({ max: 500, maxAge: 30000 });
 const disablePrefetchCache = new LruCache({ max: 500, maxAge: 30000 });
 
+const isIE = /MSIE \d|Trident.*rv:/.test(navigator.userAgent);
+
 const enablePrefetch = (path) => {
   enablePrefetchCache.set(path, true);
 };
@@ -356,6 +358,9 @@ class BoltClient {
   }
 
   startIpfs() {
+    if (isIE) {
+      throw new Error('IPFS not supported in IE');
+    }
     if (this.ipfsReady) {
       return this.ipfsReady;
     }
