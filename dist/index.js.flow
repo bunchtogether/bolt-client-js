@@ -477,26 +477,25 @@ class BoltClient {
     this.metadataOrMap = new IpfsObservedRemoveMap(ipfs, `${clusterId}:files`, [], { disableSync: true });
     this.metadataOrMap.on('set', (path, { hash, mimetype }) => {
       logTime('METADATA', path);
-      if (shouldPrefetch(path)) {
-        const stream = this.ipfs.getReadableStream(hash);
-        if (isPlaylistMimetype(mimetype)) {
-          const file = new Stream.PassThrough({ objectMode: true });
-          stream.on('error', (error) => {
-            console.log(`Unable to get stream for ${path}:`);
-            console.error(error);
-            file.destroy(error);
-          });
-          stream.on('data', ({ content }) => {
-            if (file.writable) {
-              pump(content, file);
-            }
-            stream.end();
-          });
-          this.parseM3u8Stream(file);
-        }
-      }
+      // if (shouldPrefetch(path)) {
+      //  const stream = this.ipfs.getReadableStream(hash);
+      //  if (isPlaylistMimetype(mimetype)) {
+      //    const file = new Stream.PassThrough({ objectMode: true });
+      //    stream.on('error', (error) => {
+      //      console.log(`Unable to get stream for ${path}:`);
+      //      console.error(error);
+      //      file.destroy(error);
+      //    });
+      //    stream.on('data', ({ content }) => {
+      //      if (file.writable) {
+      //        pump(content, file);
+      //      }
+      //      stream.end();
+      //    });
+      //    this.parseM3u8Stream(file);
+      //  }
+      // }
     });
-    await this.runGarbageCollection();
     // $FlowFixMe
     if ('storage' in navigator && 'estimate' in navigator.storage) {
       setInterval(() => {
