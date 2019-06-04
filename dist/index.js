@@ -440,6 +440,11 @@ class BoltClient {
         modules: {
           connProtector: new Protector(swarmKey),
         },
+        config: {
+          dht: {
+            enabled: true,
+          },
+        },
       },
       config: {
         Addresses: {
