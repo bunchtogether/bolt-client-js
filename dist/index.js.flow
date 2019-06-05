@@ -114,8 +114,10 @@ const ipfsLoadPromise = (async () => {
 class BoltLoader {
   file: Readable;
   timeout: TimeoutID;
+  retryTimeout: TimeoutID;
   config: Object;
   url: string;
+  stats: Object;
 
   static boltClient = {
     getProxyPath: (path:string) => { // eslint-disable-line no-unused-vars
@@ -136,10 +138,10 @@ class BoltLoader {
     this.config = config;
   }
 
-  load(context: {url: string, responseType:string, type?: string}, config:{timeout: number}, callbacks: {onSuccess: Function, onProgress: Function, onError: Function, onTimeout: Function}) {
+  load(context: {url: string, responseType:string, type?: string}, config:{timeout: number, maxRetry: number, maxRetryDelay: number}, callbacks: {onSuccess: Function, onProgress: Function, onError: Function, onTimeout: Function}) {
     const boltClient = this.constructor.boltClient;
     const start = Date.now();
-    const stats:Object = {
+    this.stats = this.stats || {
       trequest: performance.now(),
       loaded: 0,
       bw: 0,
@@ -147,6 +149,7 @@ class BoltLoader {
     };
     const { onSuccess, onError, onTimeout, onProgress } = callbacks;
     const { url, responseType } = context;
+    console.log('START', url);
     this.url = url;
     const proxyPath = boltClient.getProxyPath(url);
     const proxyUrl = boltClient.getProxyUrl(url);
@@ -158,41 +161,51 @@ class BoltLoader {
       boltClient.parseM3u8Stream(file);
     }
     const timeout = setTimeout(() => {
-      file.removeListener('end', handleEnd);
+      console.log('TIMEOUT', url);
+      file.removeListener('finish', handleFinish);
       file.removeListener('data', handleData);
       file.removeListener('error', handleError);
-      onTimeout(stats, context, null);
+      onTimeout(this.stats, context, null);
     }, config.timeout);
     this.timeout = timeout;
     const handleData = (buffer:Buffer) => {
       const seconds = (Date.now() - start) / 1000;
-      if (!stats.tfirst) {
-        stats.tfirst = performance.now();
+      if (!this.stats.tfirst) {
+        this.stats.tfirst = Math.max(this.stats.trequest, performance.now());
       }
-      stats.loaded += buffer.length;
-      stats.bw = stats.loaded * 8 / seconds;
+      this.stats.loaded += buffer.length;
+      this.stats.bw = this.stats.loaded * 8 / seconds;
       if (onProgress) {
-        onProgress(stats, context, null, boltClient);
+        onProgress(this.stats, context, null, boltClient);
       }
       chunks.push(buffer);
     };
-    const handleEnd = () => {
+    const handleFinish = () => {
+      console.log('DONE', url);
       clearTimeout(timeout);
-      file.removeListener('end', handleEnd);
+      file.removeListener('finish', handleFinish);
       file.removeListener('data', handleData);
       file.removeListener('error', handleError);
       const arrayBuffer = mergeUint8Arrays(chunks);
-      stats.total = arrayBuffer.length;
+      this.stats.tload = Math.max(this.stats.tfirst, performance.now());
+      this.stats.total = this.stats.loaded = arrayBuffer.length;
       if (responseType === 'arraybuffer') {
-        onSuccess({ url: proxyUrl, data: arrayBuffer }, stats, context, boltClient);
+        onSuccess({ url: proxyUrl, data: arrayBuffer }, this.stats, context, boltClient);
       } else {
-        onSuccess({ url: proxyUrl, data: Buffer.from(arrayBuffer).toString('utf8') }, stats, context, boltClient);
+        onSuccess({ url: proxyUrl, data: Buffer.from(arrayBuffer).toString('utf8') }, this.stats, context, boltClient);
       }
       delete this.file;
     };
     const handleError = (error) => {
+      if (this.stats.retry <= config.maxRetry) {
+        this.stats.retry += 1;
+        this.retryTimeout = setTimeout(() => {
+          this.load(context, config, callbacks);
+        }, config.maxRetryDelay);
+        return;
+      }
       clearTimeout(timeout);
-      file.removeListener('end', handleEnd);
+      file.removeListener('finish', handleFinish);
       file.removeListener('data', handleData);
       file.removeListener('error', handleError);
       console.log(`Error loading ${url}:`);
@@ -201,11 +214,12 @@ class BoltLoader {
       delete this.file;
     };
     file.on('data', handleData);
-    file.on('end', handleEnd);
+    file.on('finish', handleFinish);
     file.on('error', handleError);
   }
 
   abort() {
+    clearTimeout(this.retryTimeout);
     clearTimeout(this.timeout);
     if (this.file) {
       this.file.removeAllListeners();
@@ -251,7 +265,7 @@ class BoltClient {
     let activePeerCount = 0;
     setInterval(() => {
       if (this.proxyBytes > 0 || this.ipfsBytes > 0 || this.proxyTime > 0 || this.ipfsTime > 0) {
-        console.log('Stats:');
+        console.log('this.stats:');
       }
       if (this.proxyBytes > 0 || this.ipfsBytes > 0) {
         const percentage = Math.round(10000 * this.ipfsBytes / (this.proxyBytes + this.ipfsBytes)) / 100;
@@ -266,10 +280,17 @@ class BoltClient {
         console.log(`\tP2P speed: ${kbps} Kbs`);
       }
       if (this.ipfs) {
-        this.ipfs.swarm.peers().then((peerInfos) => {
+        this.ipfs.swarm.peers({ verbose: true }).then((peerInfos) => {
           if (peerInfos.length !== activePeerCount) {
             activePeerCount = peerInfos.length;
-            console.log(`${activePeerCount} peers`);
+            if (peerInfos.length === 0) {
+              console.log('No connected peers');
+            } else {
+              console.log('Connected peers:');
+              for (const { addr } of peerInfos) {
+                console.log(`\t${addr}`);
+              }
+            }
           }
         }).catch((error) => {
           console.log('Unable to get swarm peers');
@@ -426,7 +447,7 @@ class BoltClient {
         enabled: false,
       },
       relay: {
-        enabled: true,
+        enabled: false,
         hop: {
           enabled: true,
           active: true,
@@ -435,6 +456,7 @@ class BoltClient {
       EXPERIMENTAL: {
         pubsub: true,
         sharding: true,
+        dht: true,
       },
       libp2p: {
         modules: {
@@ -477,25 +499,26 @@ class BoltClient {
     this.metadataOrMap = new IpfsObservedRemoveMap(ipfs, `${clusterId}:files`, [], { disableSync: true });
     this.metadataOrMap.on('set', (path, { hash, mimetype }) => {
       logTime('METADATA', path);
-      // if (shouldPrefetch(path)) {
-      //  const stream = this.ipfs.getReadableStream(hash);
-      //  if (isPlaylistMimetype(mimetype)) {
-      //    const file = new Stream.PassThrough({ objectMode: true });
-      //    stream.on('error', (error) => {
-      //      console.log(`Unable to get stream for ${path}:`);
-      //      console.error(error);
-      //      file.destroy(error);
-      //    });
-      //    stream.on('data', ({ content }) => {
-      //      if (file.writable) {
-      //        pump(content, file);
-      //      }
-      //      stream.end();
-      //    });
-      //    this.parseM3u8Stream(file);
-      //  }
-      // }
+      if (shouldPrefetch(path)) {
+        const stream = this.ipfs.getReadableStream(hash);
+        if (isPlaylistMimetype(mimetype)) {
+          const file = new Stream.PassThrough({ objectMode: true });
+          stream.on('error', (error) => {
+            console.log(`Unable to get stream for ${path}:`);
+            console.error(error);
+            file.destroy(error);
+          });
+          stream.on('data', ({ content }) => {
+            if (file.writable) {
+              pump(content, file);
+            }
+            stream.end();
+          });
+          this.parseM3u8Stream(file);
+        }
+      }
     });
+    this.runGarbageCollection();
     // $FlowFixMe
     if ('storage' in navigator && 'estimate' in navigator.storage) {
       setInterval(() => {
@@ -625,6 +648,7 @@ class BoltClient {
     }
     const expires = metadata.expires;
     if (expires) {
+      console.log('EXPIRES', new Date(expires) - new Date(), path);
       if (new Date(expires) < new Date()) {
         logTime('MISS:EXPIRED', path);
         if (path.indexOf('origin/') === 0) {
