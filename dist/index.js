@@ -1,284 +1,51 @@
 //      
 
-                                       
-
+import Url from 'url-parse';
 import Protector from 'libp2p-pnet';
-import IpfsObservedRemoveMap from 'ipfs-observed-remove/dist/map';
-import Stream from 'readable-stream';
-import streamToString from 'stream-to-string';
-import pump from 'pump';
-import URL from 'url-parse';
-import { Parser } from 'm3u8-parser';
 import request from 'request';
-import multibase from 'multibase';
-import LruCache from 'lru-cache';
 
-const enablePrefetchCache = new LruCache({ max: 500, maxAge: 30000 });
-const disablePrefetchCache = new LruCache({ max: 500, maxAge: 30000 });
+class BoltUrlError extends Error {}
+
+class BoltIpfsError extends Error {}
 
 const isIE = /MSIE \d|Trident.*rv:/.test(navigator.userAgent);
-
-const enablePrefetch = (path) => {
-  enablePrefetchCache.set(path, true);
-};
-
-const disablePrefetch = (path) => {
-  disablePrefetchCache.set(path, true);
-};
-
-const shouldPrefetch = (path       ) => enablePrefetchCache.has(path) && !disablePrefetchCache.has(path);
-
-const timeCache = new LruCache({ max: 500 });
-const logTime = (message        , path        ) => {
-  if (path.indexOf('m3u8') !== -1) {
-    return;
-  }
-  let start = timeCache.get(path);
-  if (!start) {
-    start = Date.now();
-    timeCache.set(path, start);
-    console.log(path.split('/').pop(), message, start);
-  } else {
-    console.log(path.split('/').pop(), message, start, Date.now(), `+${Date.now() - start}`);
-    timeCache.del(path);
-  }
-};
-
-const mergeUint8Arrays = (arrays) => {
-  let length = 0;
-  arrays.forEach((item) => {
-    length += item.length;
-  });
-  const merged = new Uint8Array(length);
-  let offset = 0;
-  arrays.forEach((item) => {
-    merged.set(item, offset);
-    offset += item.length;
-  });
-  return merged;
-};
-
-const { performance } = window;
-
-const isFqdmRegex = /^(?!:\/\/)(?!.{256,})(([a-z0-9][a-z0-9_-]*?\.)+?[a-z]{2,16}?)$/i;
-
-const isFqdm = (hostname        ) => isFqdmRegex.test(hostname);
-
-export class FilesError extends Error {
-              
-  constructor(message       , code       ) {
-    super(message);
-    this.code = code;
-  }
-}
-
-                            
-                 
-               
-               
-                   
-                    
-                  
-                  
-  
-
-const ipfsLoadPromise = (async () => {
-  for (let i = 0; i < 10; i += 1) {
-    if (window) {
-      const { Ipfs } = window;
-      if (Ipfs) {
-        return Ipfs;
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100)); // eslint-disable-line no-loop-func
-  }
-  let j = 0;
-  while (true) {
-    j += 1;
-    if (window) {
-      const { Ipfs } = window;
-      if (Ipfs) {
-        return Ipfs;
-      }
-    }
-    if (j < 8) {
-      await new Promise((resolve) => setTimeout(resolve, 1000 * j * j)); // eslint-disable-line no-loop-func
-    } else {
-      await new Promise((resolve) => setTimeout(resolve, 1000 * 60)); // eslint-disable-line no-loop-func
-    }
-  }
-  throw new Error('Unable to load IPFS'); // eslint-disable-line no-unreachable
-})();
-
-
-class BoltLoader {
-                 
-                     
-                          
-                 
-              
-                
-
-  static boltClient = {
-    getProxyPath: (path       ) => { // eslint-disable-line no-unused-vars
-      throw new Error('Not implemented');
-    },
-    getProxyUrl: (urlString       ) => { // eslint-disable-line no-unused-vars
-      throw new Error('Not implemented');
-    },
-    getStream: (path       ) => { // eslint-disable-line no-unused-vars
-      throw new Error('Not implemented');
-    },
-    parseM3u8Stream: (file          ) => { // eslint-disable-line no-unused-vars
-      throw new Error('Not implemented');
-    },
-  };
-
-  constructor(config       ) {
-    this.config = config;
-  }
-
-  load(context                                                   , config                                                           , callbacks                                                                                     ) {
-    const boltClient = this.constructor.boltClient;
-    const start = Date.now();
-    this.stats = this.stats || {
-      trequest: performance.now(),
-      loaded: 0,
-      bw: 0,
-      retry: 0,
-    };
-    const { onSuccess, onError, onTimeout, onProgress } = callbacks;
-    const { url, responseType } = context;
-    console.log('START', url);
-    this.url = url;
-    const proxyPath = boltClient.getProxyPath(url);
-    const proxyUrl = boltClient.getProxyUrl(url);
-    const chunks = [];
-    const file = boltClient.getStream(proxyPath);
-    this.file = file;
-    if (context.type === 'level') {
-      enablePrefetch(proxyPath);
-      boltClient.parseM3u8Stream(file);
-    }
-    const timeout = setTimeout(() => {
-      console.log('TIMEOUT', url);
-      file.removeListener('finish', handleFinish);
-      file.removeListener('data', handleData);
-      file.removeListener('error', handleError);
-      onTimeout(this.stats, context, null);
-    }, config.timeout);
-    this.timeout = timeout;
-    const handleData = (buffer       ) => {
-      const seconds = (Date.now() - start) / 1000;
-      if (!this.stats.tfirst) {
-        this.stats.tfirst = Math.max(this.stats.trequest, performance.now());
-      }
-      this.stats.loaded += buffer.length;
-      this.stats.bw = this.stats.loaded * 8 / seconds;
-      if (onProgress) {
-        onProgress(this.stats, context, null, boltClient);
-      }
-      chunks.push(buffer);
-    };
-    const handleFinish = () => {
-      console.log('DONE', url);
-      clearTimeout(timeout);
-      file.removeListener('finish', handleFinish);
-      file.removeListener('data', handleData);
-      file.removeListener('error', handleError);
-      const arrayBuffer = mergeUint8Arrays(chunks);
-      this.stats.tload = Math.max(this.stats.tfirst, performance.now());
-      this.stats.total = this.stats.loaded = arrayBuffer.length;
-      if (responseType === 'arraybuffer') {
-        onSuccess({ url: proxyUrl, data: arrayBuffer }, this.stats, context, boltClient);
-      } else {
-        onSuccess({ url: proxyUrl, data: Buffer.from(arrayBuffer).toString('utf8') }, this.stats, context, boltClient);
-      }
-      delete this.file;
-    };
-    const handleError = (error) => {
-      if (this.stats.retry <= config.maxRetry) {
-        this.stats.retry += 1;
-        this.retryTimeout = setTimeout(() => {
-          this.load(context, config, callbacks);
-        }, config.maxRetryDelay);
-        return;
-      }
-      clearTimeout(timeout);
-      file.removeListener('finish', handleFinish);
-      file.removeListener('data', handleData);
-      file.removeListener('error', handleError);
-      console.log(`Error loading ${url}:`);
-      console.error(error);
-      onError({ code: 500, text: error.message }, context);
-      delete this.file;
-    };
-    file.on('data', handleData);
-    file.on('finish', handleFinish);
-    file.on('error', handleError);
-  }
-
-  abort() {
-    clearTimeout(this.retryTimeout);
-    clearTimeout(this.timeout);
-    if (this.file) {
-      this.file.removeAllListeners();
-      delete this.file;
-    }
-  }
-  destroy() {
-    delete this.config;
-    this.abort();
-  }
-}
-
-const PLAYLIST_MIMETYPES = new Set(['application/vnd.apple.mpegurl', 'application/x-mpegurl']);
-
-const isPlaylistMimetype = (mimetype        ) => PLAYLIST_MIMETYPES.has(mimetype.toLowerCase());
 
 /**
  * Class representing a Bolt Client
  */
-class BoltClient {
-               
-                                                             
-                
-                   
-               
+export class BoltClient {
+                        
                
                             
-                     
-                    
-                    
-                   
-                    
-               
-                                                 
                            
+                   
+                       
+                            
 
   constructor() {
-    this.proxyBytes = 0;
-    this.ipfsBytes = 0;
-    this.proxyTime = 0;
-    this.ipfsTime = 0;
-    this.playlistUpdateTimeouts = new Map();
+    this.baseUrls = new Set();
+    this.ready = new Promise((resolve) => {
+      this.readyCallback = () => resolve();
+    });
+    const serverAddressesString = localStorage.getItem('BOLT_SERVER_ADDRESSES');
+    if (serverAddressesString) {
+      try {
+        const serverAddresses = JSON.parse(serverAddressesString);
+        if (serverAddresses.length > 0) {
+          console.log('Stored Bolt server addresses:');
+        }
+        for (const serverAddress of serverAddresses) {
+          console.log(`\t${serverAddress}`);
+          this.addServer(serverAddress);
+        }
+      } catch (error) {
+        console.log('Unable to parse stored Bolt server addresses');
+        console.error(error);
+        localStorage.removeItem('BOLT_SERVER_ADDRESSES');
+      }
+    }
     let activePeerCount = 0;
     setInterval(() => {
-      if (this.proxyBytes > 0 || this.ipfsBytes > 0 || this.proxyTime > 0 || this.ipfsTime > 0) {
-        console.log('this.stats:');
-      }
-      if (this.proxyBytes > 0 || this.ipfsBytes > 0) {
-        const percentage = Math.round(10000 * this.ipfsBytes / (this.proxyBytes + this.ipfsBytes)) / 100;
-        console.log(`\t${percentage}% P2P (bytes)`);
-      }
-      if (this.proxyTime > 0) {
-        const kbps = Math.round(10 * (this.proxyBytes * 8) / (1024 * this.proxyTime / 1000)) / 10;
-        console.log(`\tProxy speed: ${kbps} Kbs`);
-      }
-      if (this.ipfsTime > 0) {
-        const kbps = Math.round(10 * (this.ipfsBytes * 8) / (1024 * this.ipfsTime / 1000)) / 10;
-        console.log(`\tP2P speed: ${kbps} Kbs`);
-      }
       if (this.ipfs) {
         this.ipfs.swarm.peers({ verbose: true }).then((peerInfos) => {
           if (peerInfos.length !== activePeerCount) {
@@ -293,71 +60,147 @@ class BoltClient {
             }
           }
         }).catch((error) => {
-          console.log('Unable to get swarm peers');
+          console.log('Unable to get Bolt peers');
           console.error(error);
         });
       }
     }, 10000);
-    const storedServerSettings = this.getStoredServerSettings();
-    if (storedServerSettings.host && storedServerSettings.protocol && storedServerSettings.port) {
-      this.setServer(storedServerSettings.protocol, storedServerSettings.host, storedServerSettings.port);
+  }
+
+  addServer(s       ) {
+    const { protocol, slashes, username, password, host, port } = new Url(s);
+    const result = [protocol || 'https:'];
+    if (protocol && protocol.charAt(protocol.length - 1) !== ':') {
+      result.push(':');
+    }
+    if (slashes) {
+      result.push('//');
+    }
+    if (username) {
+      result.push(username);
+      if (password) {
+        result.push(`:${password}`);
+      }
+      result.push('@');
+    }
+    result.push(host);
+    result.push(port || (protocol === 'https:' ? ':443' : ':80'));
+    const baseUrl = result.join('');
+    const firstServer = this.baseUrls.size === 0;
+    if (this.baseUrls.has(baseUrl)) {
+      return;
+    }
+    this.addToSwarm(baseUrl);
+    this.baseUrls.add(baseUrl);
+    this.saveServerAddresses();
+    if (firstServer) {
+      this.queryForPeers(baseUrl).catch((error) => {
+        console.log(`Unable to query ${baseUrl} for Bolt peers: ${error.message}`);
+      });
+    }
+    this.readyCallback();
+  }
+
+  saveServerAddresses() {
+    localStorage.setItem('BOLT_SERVER_ADDRESSES', JSON.stringify([...this.baseUrls]));
+  }
+
+  getUrl(path       ) {
+    if (this.baseUrls.size === 0) {
+      throw new BoltUrlError('No base URLs');
+    }
+    const baseUrls = Array.from(this.baseUrls);
+    const baseUrl = baseUrls[Math.floor(Math.random() * baseUrls.length)];
+    return `${baseUrl}/${path}`;
+  }
+
+  async queryForPeers(baseUrl       ) {
+    const { protocol, port } = new Url(baseUrl);
+    const peerHostnames = await new Promise((resolve, reject) => {
+      request.get(`${baseUrl}/api/1.0/network-map/hostnames`, (error, response, body) => {
+        if (error) {
+          reject(error);
+        } else {
+          try {
+            resolve(JSON.parse(body));
+          } catch (parseError) {
+            reject(parseError);
+          }
+        }
+      });
+    });
+    const peerUrls = new Set();
+    for (const peerHostname of peerHostnames) {
+      peerUrls.add(`${protocol}//${peerHostname}:${port || (protocol === 'https:' ? '443' : '80')}`);
+    }
+    const newUrls = [...peerUrls].filter((url) => !this.baseUrls.has(url));
+    const oldUrls = [...this.baseUrls].filter((url) => !peerUrls.has(url));
+    if (newUrls.length === 0) {
+      return;
+    }
+    for (const url of oldUrls) {
+      this.baseUrls.delete(url);
+    }
+    for (const url of newUrls) {
+      this.addServer(url);
     }
   }
 
-  get hlsJsLoader() {
-    const boltClient = this;
-    class C extends BoltLoader {
-      static boltClient = boltClient;
+  async getSwarmSettings(baseUrl       ) {
+    const localStorageKey = `${baseUrl}:BOLT_SWARM_SETTINGS`;
+    const storedSwarmSettingsString = localStorage.getItem(localStorageKey);
+    if (storedSwarmSettingsString) {
+      try {
+        return JSON.parse(storedSwarmSettingsString);
+      } catch (error) {
+        console.log('Unable to parse stored Bolt settings');
+        console.error(error);
+        localStorage.removeItem(localStorageKey);
+      }
     }
-    return C;
+    const swarmSettings = await new Promise((resolve, reject) => {
+      request.get(`${baseUrl}/api/1.0/swarm`, (error, response, body) => {
+        if (error) {
+          reject(error);
+        } else {
+          try {
+            resolve(JSON.parse(body));
+          } catch (parseError) {
+            reject(parseError);
+          }
+        }
+      });
+    });
+    localStorage.setItem(localStorageKey, JSON.stringify(swarmSettings));
+    return swarmSettings;
   }
 
-  getStoredServerSettings() {
-    const storedServerSettingsString = localStorage.getItem('BOLT_SERVER_SETTINGS');
-    if (!storedServerSettingsString) {
-      return {};
+  async getIpfs() {
+    for (let i = 0; i < 10; i += 1) {
+      if (window) {
+        const { Ipfs } = window;
+        if (Ipfs) {
+          return Ipfs;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100)); // eslint-disable-line no-loop-func
     }
-    try {
-      return JSON.parse(storedServerSettingsString);
-    } catch (error) {
-      console.log('Unable to parse stored server settings');
-      console.error(error);
+    let j = 0;
+    while (true) {
+      j += 1;
+      if (window) {
+        const { Ipfs } = window;
+        if (Ipfs) {
+          return Ipfs;
+        }
+      }
+      if (j < 8) {
+        await new Promise((resolve) => setTimeout(resolve, 1000 * j * j)); // eslint-disable-line no-loop-func
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 1000 * 60)); // eslint-disable-line no-loop-func
+      }
     }
-    localStorage.removeItem('BOLT_SERVER_SETTINGS');
-    localStorage.removeItem('BOLT_SWARM_SETTINGS');
-    return {};
-  }
-
-  getStoredSwarmSettings() {
-    const storedSwarmSettingsString = localStorage.getItem('BOLT_SWARM_SETTINGS');
-    if (!storedSwarmSettingsString) {
-      return {};
-    }
-    try {
-      return JSON.parse(storedSwarmSettingsString);
-    } catch (error) {
-      console.log('Unable to parse stored swarm settings');
-      console.error(error);
-    }
-    localStorage.removeItem('BOLT_SERVER_SETTINGS');
-    localStorage.removeItem('BOLT_SWARM_SETTINGS');
-    return {};
-  }
-
-  setServer(protocol        , host        , port        ) {
-    this.protocol = protocol;
-    this.host = host;
-    this.port = port;
-    const storedServerSettings = this.getStoredServerSettings();
-    if (storedServerSettings.protocol !== protocol || storedServerSettings.host !== host || storedServerSettings.port !== port) {
-      localStorage.setItem('BOLT_SERVER_SETTINGS', JSON.stringify({ protocol, host, port }));
-      this.restartIpfs();
-    }
-  }
-
-  base32Hostname(id        ) {
-    const base32Id = multibase.encode('base32', multibase.decode(`z${id}`)).slice(1).toString();
-    return `p-${base32Id}.${this.host}`;
+    throw new Error('Unable to load IPFS'); // eslint-disable-line no-unreachable
   }
 
   async restartIpfs() {
@@ -395,52 +238,86 @@ class BoltClient {
     return ipfsReady;
   }
 
-  async _startIpfs() {
-    if (this.ipfs) {
-      throw new Error('IPFS already started');
-    }
-    const IPFS = await ipfsLoadPromise;
-    let { id, swarmKey, peerIds, clusterId } = this.getStoredSwarmSettings();
-    if (!id || !swarmKey || !peerIds || !clusterId) {
-      const swarmSettings = await this.getJson('/api/1.0/swarm');
-      id = swarmSettings.id;
-      swarmKey = swarmSettings.swarmKey;
-      peerIds = swarmSettings.peerIds;
-      clusterId = swarmSettings.clusterId;
-      localStorage.setItem('BOLT_SWARM_SETTINGS', JSON.stringify({ id, swarmKey, peerIds, clusterId }));
-    } else {
-      console.log('Using saved swarm settings');
-      this.getJson('/api/1.0/swarm').then(async (swarmSettings) => {
-        if (swarmSettings.id !== id || swarmSettings.swarmKey !== swarmKey || swarmSettings.clusterId !== clusterId) {
-          localStorage.setItem('BOLT_SWARM_SETTINGS', JSON.stringify(swarmSettings));
-          this.restartIpfs();
-        }
-        if (this.ipfs && isFqdm(this.host)) {
-          for (const peerId of swarmSettings.peerIds) {
-            this.ipfs.swarm.connect(`/dns4/${this.base32Hostname(peerId)}/tcp/${this.port}/${wrtcProtocol}/ipfs/${peerId}`).catch((error) => {
-              console.log(`Unable to connect to swarm peer ${peerId}`);
-              console.error(error);
-            });
-          }
-        }
-      }).catch((error) => {
-        console.log('Unable to get swarm settings');
-        console.error(error);
-      });
-    }
-    this.clusterId = clusterId;
-    const wrtcProtocol = this.protocol === 'https' ? 'wss' : 'ws';
-    const swarmAddresses = [];
-    const bootstrap = [];
-    if (isFqdm(this.host)) {
-      swarmAddresses.push(`/dns4/${this.base32Hostname(id)}/tcp/${this.port}/${wrtcProtocol}/p2p-webrtc-star`);
-      bootstrap.push(`/dns4/${this.base32Hostname(id)}/tcp/${this.port}/${wrtcProtocol}/ipfs/${id}`);
-      for (const peerId of peerIds) {
-        bootstrap.push(`/dns4/${this.base32Hostname(peerId)}/tcp/${this.port}/${wrtcProtocol}/ipfs/${peerId}`);
+  async addToSwarm(baseUrl       ) {
+    const ipfsReady = this.ipfsReady;
+    if (ipfsReady) {
+      try {
+        await ipfsReady;
+      } catch (error) {
+        console.log(`IPFS failed to start before adding ${baseUrl} to swarm, continuing`);
       }
     }
-    swarmAddresses.push(`/dns4/${this.host}/tcp/${this.port}/${wrtcProtocol}/p2p-webrtc-star`);
-    bootstrap.push(`/dns4/${this.host}/tcp/${this.port}/${wrtcProtocol}/ipfs/${id}`);
+    if (this.ipfsReady) {
+      return;
+    }
+    const ipfs = this.ipfs;
+    if (!ipfs) {
+      return;
+    }
+    const { protocol, host, port } = new Url(baseUrl);
+    const wrtcPort = port || (protocol === 'https:' ? 443 : 80);
+    const wrtcProtocol = protocol === 'https:' ? 'wss' : 'ws';
+    try {
+      const { id, swarmKey } = await this.getSwarmSettings(baseUrl);
+      if (this.swarmKey && swarmKey !== this.swarmKey) {
+        // Restart if swarm keys don't match
+        this.baseUrls = new Set([baseUrl]);
+        this.saveServerAddresses();
+        this.restartIpfs();
+        return;
+      }
+      const multiaddr = `/dns4/${host}/tcp/${wrtcPort}/${wrtcProtocol}/ipfs/${id}`;
+      console.log(`Connecting to ${multiaddr}`);
+      await ipfs.swarm.connect(multiaddr);
+    } catch (error) {
+      console.log(`Unable to get Bolt settings from ${baseUrl}`);
+      console.error(error);
+    }
+  }
+
+  async _startIpfs() {
+    if (this.ipfs) {
+      throw new BoltIpfsError('IPFS already started');
+    }
+    if (this.baseUrls.size === 0) {
+      throw new BoltUrlError('No base URLs');
+    }
+    let swarmKey;
+    let clusterId;
+    let swarmAddresses = [];
+    const bootstrap = [];
+    for (const baseUrl of this.baseUrls) {
+      const { protocol, host, port } = new Url(baseUrl);
+      const wrtcPort = port || (protocol === 'https:' ? 443 : 80);
+      const wrtcProtocol = protocol === 'https:' ? 'wss' : 'ws';
+      try {
+        const swarmSettings = await this.getSwarmSettings(baseUrl);
+        if (swarmKey && swarmKey !== swarmSettings.swarmKey) {
+          // Restart if swarm keys don't match
+          this.baseUrls = new Set([baseUrl]);
+          this.saveServerAddresses();
+          this.restartIpfs();
+          return;
+        }
+        swarmKey = swarmSettings.swarmKey;
+        clusterId = swarmSettings.clusterId;
+        if (swarmAddresses.length === 0) {
+          swarmAddresses = [`/dns4/${host}/tcp/${wrtcPort}/${wrtcProtocol}/p2p-webrtc-star`];
+        }
+        bootstrap.push(`/dns4/${host}/tcp/${wrtcPort}/${wrtcProtocol}/ipfs/${swarmSettings.id}`);
+      } catch (error) {
+        console.log(`Unable to get Bolt settings from ${baseUrl}`);
+        console.error(error);
+      }
+    }
+    if (!swarmKey) {
+      throw new BoltIpfsError('Unable to fetch swarm key');
+    }
+    if (!clusterId) {
+      throw new BoltIpfsError('Unable to fetch cluster ID');
+    }
+    this.swarmKey = swarmKey;
+    const IPFS = await this.getIpfs();
     const config = {
       repo: 'bolt',
       preload: {
@@ -496,188 +373,13 @@ class BoltClient {
     });
     this.idPromise = ipfs.id().then((ipfsResponse) => ipfsResponse.id);
     this.ipfs = ipfs;
-    this.metadataOrMap = new IpfsObservedRemoveMap(ipfs, `${clusterId}:files`, [], { disableSync: true });
-    this.metadataOrMap.on('set', (path, { hash, mimetype }) => {
-      logTime('METADATA', path);
-      if (shouldPrefetch(path)) {
-        const stream = this.ipfs.getReadableStream(hash);
-        if (isPlaylistMimetype(mimetype)) {
-          const file = new Stream.PassThrough({ objectMode: true });
-          stream.on('error', (error) => {
-            console.log(`Unable to get stream for ${path}:`);
-            console.error(error);
-            file.destroy(error);
-          });
-          stream.on('data', ({ content }) => {
-            if (file.writable) {
-              pump(content, file);
-            }
-            stream.end();
-          });
-          this.parseM3u8Stream(file);
-        }
-      }
-    });
-    this.runGarbageCollection();
-    // $FlowFixMe
-    if ('storage' in navigator && 'estimate' in navigator.storage) {
-      setInterval(() => {
-        this.runGarbageCollection();
-      }, 60 * 1000);
-    } else {
-      setInterval(() => {
-        this.runGarbageCollection();
-      }, 60 * 60 * 1000);
-    }
-  }
-
-  async runGarbageCollection() {
-    const ipfs = this.ipfs;
-    if (!ipfs) {
-      return;
-    }
-    // $FlowFixMe
-    if ('storage' in navigator && 'estimate' in navigator.storage) {
-      // $FlowFixMe
-      const { usage, quota } = await navigator.storage.estimate();
-      console.log(`Using ${Math.round(10000 * usage / quota) / 100}% of ${Math.round(100 * quota / 1024 / 1024 / 1024) / 100} GB storage quota`);
-      if (usage < 5368709120 && (usage / quota) < 0.5) {
-        return;
-      }
-    }
-    console.log('Running IPFS garbage collection');
-    try {
-      await ipfs.repo.gc();
-    } catch (error) {
-      console.log('Unable to run IPFS garbage collection');
-      console.error(error);
-    }
-  }
-
-  async parseM3u8Stream(stream          ) {
-    const manifest = await streamToString(stream);
-    const parser = new Parser();
-    parser.push(manifest);
-    parser.end();
-    if (parser && parser.manifest && parser.manifest.segments) {
-      for (const segment of parser.manifest.segments) {
-        enablePrefetch(segment.uri.slice(1));
-      }
-    }
-  }
-
-  getProxyUrl(urlString       ) {
-    const proxyPath = this.getProxyPath(urlString);
-    return `${this.protocol}://${this.host}:${this.port}/${proxyPath}`;
-  }
-
-  getProxyPath(urlString       ) {
-    const url = new URL(urlString);
-    if (url.pathname.indexOf('origin/') !== -1) {
-      return `${url.pathname.slice(1)}${url.query ? `?${url.query}` : ''}`;
-    }
-    return `origin/${url.hostname}${url.pathname}${url.query ? `?${url.query}` : ''}`;
-  }
-
-  getJson(path       )                 {
-    return new Promise((resolve, reject) => {
-      request.get(`${this.protocol}://${this.host}:${this.port}${path}`, (error, response, body) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve(JSON.parse(body));
-        }
-      });
-    });
-  }
-
-  getProxyStream(path       )          {
-    const req = request.get(`${this.protocol}://${this.host}:${this.port}/${path}`);
-    const file = new Stream.PassThrough({ objectMode: true });
-    const start = Date.now();
-    pump(req, file);
-    file.on('end', () => {
-      this.proxyTime += Date.now() - start;
-    });
-    file.on('data', (data           ) => {
-      this.proxyBytes += data.length;
-    });
-    req.on('response', (response) => {
-      if (isPlaylistMimetype(response.caseless.get('content-type'))) {
-        disablePrefetch(path);
-      }
-    });
-    if (this.ipfs) {
-      const ingest = new Stream.PassThrough({ objectMode: true });
-      pump(req, ingest);
-      this.ipfs.add({
-        path: null,
-        content: ingest,
-      }, {
-        wrapWithDirectory: false,
-        recursive: false,
-        pin: false,
-      }, (error) => {
-        if (error) {
-          console.log(`Unable to ingest ${path}`);
-          console.error(error);
-        }
-      });
-    }
-    return file;
-  }
-
-  getStream(path       )          {
-    if (!this.metadataOrMap) {
-      logTime('MISS:MAP', path);
-      if (path.indexOf('origin/') === 0) {
-        return this.getProxyStream(path);
-      }
-      throw new FilesError(`Unable to load ${path} metadata map does not exist`, 404);
-    }
-    const metadata = this.metadataOrMap.get(path);
-    if (!metadata) {
-      logTime('MISS:METADATA', path);
-      if (path.indexOf('origin/') === 0) {
-        return this.getProxyStream(path);
-      }
-      throw new FilesError(`Unable to find ${path}`, 404);
-    }
-    if (!isPlaylistMimetype(metadata.mimetype)) {
-      disablePrefetch(path);
-    }
-    const expires = metadata.expires;
-    if (expires) {
-      console.log('EXPIRES', new Date(expires) - new Date(), path);
-      if (new Date(expires) < new Date()) {
-        logTime('MISS:EXPIRED', path);
-        if (path.indexOf('origin/') === 0) {
-          return this.getProxyStream(path);
-        }
-        throw new FilesError(`Expired ${path}`, 404);
-      }
-    }
-    logTime('HIT', path);
-    const stream = this.ipfs.getReadableStream(metadata.hash);
-    const file = new Stream.PassThrough({ objectMode: true });
-    const start = Date.now();
-    file.on('end', () => {
-      this.ipfsTime += Date.now() - start;
-    });
-    file.on('data', (data           ) => {
-      this.ipfsBytes += data.length;
-    });
-    stream.on('error', (error) => {
-      console.log(`Unable to get stream for ${path}:`);
-      console.error(error);
-      file.destroy(error);
-    });
-    stream.on('data', ({ content }) => {
-      pump(content, file);
-      stream.end();
-    });
-    return file;
   }
 }
 
-export default new BoltClient();
+const bc = new BoltClient();
+
+if (window) {
+  window.boltClient = bc;
+}
+
+export default bc;
