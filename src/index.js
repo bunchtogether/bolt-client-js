@@ -3,6 +3,7 @@
 import Url from 'url-parse';
 import Protector from 'libp2p-pnet';
 import request from 'request';
+import BoltPubSubClient from './pubsub-client';
 
 class BoltUrlError extends Error {}
 
@@ -373,6 +374,26 @@ export class BoltClient {
     });
     this.idPromise = ipfs.id().then((ipfsResponse) => ipfsResponse.id);
     this.ipfs = ipfs;
+  }
+
+  async getPubSubClient(element: HTMLVideoElement, streamUrl:string) {
+    const ipfsReady = this.ipfsReady;
+    if (ipfsReady) {
+      try {
+        await ipfsReady;
+      } catch (error) {
+        console.log(`IPFS failed to start, cannot get PubSub client for ${streamUrl}`);
+        throw error;
+      }
+    }
+    const ipfs = this.ipfs;
+    if (!ipfs) {
+      throw new Error(`IPFS is not connected, cannot get PubSub client for ${streamUrl}`);
+    }
+    // const baseUrls = Array.from(this.baseUrls);
+    // const baseUrl = baseUrls[Math.floor(Math.random() * baseUrls.length)];
+    const baseUrl = 'http://localhost';
+    return new BoltPubSubClient(element, streamUrl, baseUrl, this.ipfs);
   }
 }
 
