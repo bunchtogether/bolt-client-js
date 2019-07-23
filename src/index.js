@@ -3,6 +3,7 @@
 import Url from 'url-parse';
 import Protector from 'libp2p-pnet';
 import request from 'request';
+import PQueue from 'p-queue';
 
 class BoltUrlError extends Error {}
 
@@ -21,9 +22,12 @@ export class BoltClient {
   swarmKey: string;
   ready: Promise<void>;
   readyCallback: () => void;
+  addToSwarmQueue: PQueue;
+  mostRecentBaseUrl: string;
 
   constructor() {
     this.baseUrls = new Set();
+    this.addToSwarmQueue = new PQueue({ concurrency: 1 });
     this.ready = new Promise((resolve) => {
       this.readyCallback = () => resolve();
     });
@@ -86,18 +90,13 @@ export class BoltClient {
     result.push(host);
     result.push(port || (protocol === 'https:' ? ':443' : ':80'));
     const baseUrl = result.join('');
-    const firstServer = this.baseUrls.size === 0;
+    this.mostRecentBaseUrl = baseUrl;
     if (this.baseUrls.has(baseUrl)) {
       return;
     }
-    this.addToSwarm(baseUrl);
     this.baseUrls.add(baseUrl);
     this.saveServerAddresses();
-    if (firstServer) {
-      this.queryForPeers(baseUrl).catch((error) => {
-        console.log(`Unable to query ${baseUrl} for Bolt peers: ${error.message}`);
-      });
-    }
+    this.addToSwarm(baseUrl);
     this.readyCallback();
   }
 
@@ -204,7 +203,6 @@ export class BoltClient {
   }
 
   async restartIpfs() {
-    console.log('Restarting IPFS');
     const ipfsReady = this.ipfsReady;
     if (ipfsReady) {
       try {
@@ -216,6 +214,7 @@ export class BoltClient {
     const ipfs = this.ipfs;
     delete this.ipfs;
     if (ipfs) {
+      console.log('Restarting IPFS');
       await ipfs.stop();
     }
     this.startIpfs();
@@ -239,31 +238,48 @@ export class BoltClient {
   }
 
   async addToSwarm(baseUrl:string) {
-    const ipfsReady = this.ipfsReady;
-    if (ipfsReady) {
-      try {
-        await ipfsReady;
-      } catch (error) {
-        console.log(`IPFS failed to start before adding ${baseUrl} to swarm, continuing`);
-      }
-    }
-    if (this.ipfsReady) {
-      return;
-    }
-    const ipfs = this.ipfs;
-    if (!ipfs) {
-      return;
-    }
-    const { protocol, host, port } = new Url(baseUrl);
-    const wrtcPort = port || (protocol === 'https:' ? 443 : 80);
-    const wrtcProtocol = protocol === 'https:' ? 'wss' : 'ws';
+    return this.addToSwarmQueue.add(() => this._addToSwarm(baseUrl)); // eslint-disable-line no-underscore-dangle
+  }
+
+  async _addToSwarm(baseUrl:string) {
     try {
       const { id, swarmKey } = await this.getSwarmSettings(baseUrl);
-      if (this.swarmKey && swarmKey !== this.swarmKey) {
+      if (this.swarmKey && swarmKey !== this.swarmKey && this.mostRecentBaseUrl) {
         // Restart if swarm keys don't match
-        this.baseUrls = new Set([baseUrl]);
+        this.addToSwarmQueue.clear();
+        this.baseUrls = new Set();
         this.saveServerAddresses();
+        this.addServer(this.mostRecentBaseUrl);
         this.restartIpfs();
+        return;
+      }
+      if (!swarmKey) {
+        throw new BoltIpfsError('Unable to fetch swarm key');
+      }
+      if (!this.swarmKey) {
+        try {
+          await this.queryForPeers(baseUrl);
+        } catch (error) {
+          console.log(`Unable to query ${baseUrl} for Bolt peers: ${error.message}`);
+        }
+      }
+      this.swarmKey = swarmKey;
+      const { protocol, host, port } = new Url(baseUrl);
+      const wrtcPort = port || (protocol === 'https:' ? 443 : 80);
+      const wrtcProtocol = protocol === 'https:' ? 'wss' : 'ws';
+      const ipfsReady = this.ipfsReady;
+      if (ipfsReady) {
+        try {
+          await ipfsReady;
+        } catch (error) {
+          console.log(`IPFS failed to start before adding ${baseUrl} to swarm, continuing`);
+        }
+      }
+      if (this.ipfsReady) {
+        return;
+      }
+      const ipfs = this.ipfs;
+      if (!ipfs) {
         return;
       }
       const multiaddr = `/dns4/${host}/tcp/${wrtcPort}/${wrtcProtocol}/ipfs/${id}`;
@@ -292,10 +308,12 @@ export class BoltClient {
       const wrtcProtocol = protocol === 'https:' ? 'wss' : 'ws';
       try {
         const swarmSettings = await this.getSwarmSettings(baseUrl);
-        if (swarmKey && swarmKey !== swarmSettings.swarmKey) {
+        if (swarmKey && swarmKey !== swarmSettings.swarmKey && this.mostRecentBaseUrl) {
           // Restart if swarm keys don't match
-          this.baseUrls = new Set([baseUrl]);
+          this.addToSwarmQueue.clear();
+          this.baseUrls = new Set();
           this.saveServerAddresses();
+          this.addServer(this.mostRecentBaseUrl);
           this.restartIpfs();
           return;
         }

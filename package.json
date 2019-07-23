@@ -1,6 +1,6 @@
 {
   "name": "@bunchtogether/bolt-client",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "main": "dist/index.js",
   "repository": "https://github.com/bunchtogether/bolt-client-js.git",
   "author": "johnwehr@bunchtogether.com",
@@ -62,6 +62,7 @@
   },
   "dependencies": {
     "libp2p-pnet": "^0.1.0",
+    "p-queue": "^6.1.0",
     "request": "^2.88.0",
     "url-parse": "^1.4.7"
   }
