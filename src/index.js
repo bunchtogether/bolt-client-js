@@ -145,6 +145,11 @@ export class BoltClient {
     }
   }
 
+  clearSwarmSettings(baseUrl:string) {
+    const localStorageKey = `${baseUrl}:BOLT_SWARM_SETTINGS`;
+    localStorage.removeItem(localStorageKey);
+  }
+
   async getSwarmSettings(baseUrl:string) {
     const localStorageKey = `${baseUrl}:BOLT_SWARM_SETTINGS`;
     const storedSwarmSettingsString = localStorage.getItem(localStorageKey);
@@ -241,11 +246,12 @@ export class BoltClient {
     return this.addToSwarmQueue.add(() => this._addToSwarm(baseUrl)); // eslint-disable-line no-underscore-dangle
   }
 
-  async _addToSwarm(baseUrl:string) {
+  async _addToSwarm(baseUrl:string, attempt?:number = 1) {
     try {
       const { id, swarmKey } = await this.getSwarmSettings(baseUrl);
       if (this.swarmKey && swarmKey !== this.swarmKey && this.mostRecentBaseUrl) {
         // Restart if swarm keys don't match
+        this.clearSwarmSettings(baseUrl);
         this.addToSwarmQueue.clear();
         this.baseUrls = new Set();
         this.saveServerAddresses();
@@ -286,6 +292,14 @@ export class BoltClient {
       console.log(`Connecting to ${multiaddr}`);
       await ipfs.swarm.connect(multiaddr);
     } catch (error) {
+      this.clearSwarmSettings(baseUrl);
+      if (attempt < 5) {
+        console.log(`Unable to get Bolt settings from ${baseUrl}, retrying in ${attempt * attempt} seconds`);
+        console.error(error);
+        await new Promise((resolve) => setTimeout(resolve, attempt * attempt * 1000));
+        await this._addToSwarm(baseUrl, attempt + 1); // eslint-disable-line no-underscore-dangle
+        return;
+      }
       console.log(`Unable to get Bolt settings from ${baseUrl}`);
       console.error(error);
     }
