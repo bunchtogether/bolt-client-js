@@ -72,7 +72,7 @@ export class BoltClient {
   }
 
   addServer(s       ) {
-    const { protocol, slashes, username, password, host, port } = new Url(s);
+    const { protocol, slashes, username, password, hostname, port } = new Url(s);
     const result = [protocol || 'https:'];
     if (protocol && protocol.charAt(protocol.length - 1) !== ':') {
       result.push(':');
@@ -87,7 +87,7 @@ export class BoltClient {
       }
       result.push('@');
     }
-    result.push(host);
+    result.push(hostname);
     result.push(port || (protocol === 'https:' ? ':443' : ':80'));
     const baseUrl = result.join('');
     this.mostRecentBaseUrl = baseUrl;
