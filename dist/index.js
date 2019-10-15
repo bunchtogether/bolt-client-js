@@ -106,7 +106,11 @@ export class BoltClient {
 
   getUrl(path       ) {
     if (this.baseUrls.size === 0) {
-      throw new BoltUrlError('No base URLs');
+      const { mostRecentBaseUrl } = this;
+      if (!mostRecentBaseUrl) {
+        throw new BoltUrlError('No base URLs');
+      }
+      return mostRecentBaseUrl;
     }
     const baseUrls = Array.from(this.baseUrls);
     const baseUrl = baseUrls[Math.floor(Math.random() * baseUrls.length)];
@@ -118,11 +122,17 @@ export class BoltClient {
     const peerHostnames = await new Promise((resolve, reject) => {
       request.get(`${baseUrl}/api/1.0/network-map/hostnames`, (error, response, body) => {
         if (error) {
+          this.clearSwarmSettings(baseUrl);
+          this.baseUrls.delete(baseUrl);
+          this.saveServerAddresses();
           reject(error);
         } else {
           try {
             resolve(JSON.parse(body));
           } catch (parseError) {
+            this.clearSwarmSettings(baseUrl);
+            this.baseUrls.delete(baseUrl);
+            this.saveServerAddresses();
             reject(parseError);
           }
         }
@@ -165,11 +175,17 @@ export class BoltClient {
     const swarmSettings = await new Promise((resolve, reject) => {
       request.get(`${baseUrl}/api/1.0/swarm`, (error, response, body) => {
         if (error) {
+          this.clearSwarmSettings(baseUrl);
+          this.baseUrls.delete(baseUrl);
+          this.saveServerAddresses();
           reject(error);
         } else {
           try {
             resolve(JSON.parse(body));
           } catch (parseError) {
+            this.clearSwarmSettings(baseUrl);
+            this.baseUrls.delete(baseUrl);
+            this.saveServerAddresses();
             reject(parseError);
           }
         }
