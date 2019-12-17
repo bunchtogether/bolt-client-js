@@ -1,15 +1,77 @@
 // @flow
 
 import Url from 'url-parse';
+import { memoize } from 'lodash';
 import Protector from 'libp2p-pnet';
 import request from 'request';
 import PQueue from 'p-queue';
+import XhrLoader from 'hls.js/src/utils/xhr-loader';
+import LruCache from 'lru-cache';
 
 class BoltUrlError extends Error {}
 
 class BoltIpfsError extends Error {}
 
 const isIE = /MSIE \d|Trident.*rv:/.test(navigator.userAgent);
+
+const getBoltOriginPath = memoize((url:string) => {
+  const parsed = new URL(url);
+  return `origin/${parsed.hostname}${parsed.port && parsed.port !== '443' && parsed.port !== '80' ? `:${parsed.port}` : ''}${parsed.pathname}${parsed.search ? `${parsed.search}` : ''}`;
+});
+
+class BoltLoader extends XhrLoader {
+  load(context, config, callbacks) {
+    const boltClient = this.constructor.boltClient;
+    let url = context.url;
+    if (url.indexOf('origin/') === -1) {
+      const originPath = getBoltOriginPath(url);
+      url = context.url = boltClient.getUrl(originPath); // eslint-disable-line no-param-reassign
+      if (url.indexOf('.m3u8') !== -1) {
+        boltClient.updateHlsSubscriptions(originPath);
+      }
+    }
+    const parsed = new URL(url);
+    const path = `${parsed.pathname.slice(1)}${parsed.search ? `${parsed.search}` : ''}`;
+    const hlsLocalFile = boltClient.hlsLocalFiles.get(path);
+    if (hlsLocalFile) {
+      console.log('HIT', path);
+      const { onSuccess, responseType } = callbacks;
+      const now = performance.now();
+      let data;
+      let length;
+      if (responseType === 'arraybuffer') {
+        data = hlsLocalFile;
+        length = hlsLocalFile.byteLength;
+      } else {
+        data = hlsLocalFile.toString();
+        length = data.length;
+      }
+      onSuccess({
+        url,
+        data,
+      }, {
+        trequest: now,
+        tfirst: now,
+        tload: now,
+        loaded: length,
+        total: length,
+        retry: 0,
+      }, context, boltClient);
+      return;
+    }
+    super.load(context, config, callbacks);
+  }
+}
+
+class BoltPlaylistLoader extends BoltLoader {
+  load(context, config, callbacks) {
+    super.load(context, config, callbacks);
+    const boltClient = this.constructor.boltClient;
+    const url = context.url;
+    const parsed = new URL(url);
+    boltClient.updateHlsSubscriptions(`${parsed.pathname.slice(1)}${parsed.search ? `${parsed.search}` : ''}`);
+  }
+}
 
 /**
  * Class representing a Bolt Client
@@ -24,6 +86,11 @@ export class BoltClient {
   readyCallback: () => void;
   addToSwarmQueue: PQueue;
   mostRecentBaseUrl: string;
+  hlsSubscriptionHandlers: Map<string, ({ data:Buffer }) => Promise<void>>;
+  hlsSubscriptionTimeouts: Map<string, TimeoutID>;
+  hlsLocalFiles: LruCache;
+  hlsJsFLoader:Object;
+  hlsJsPLoader:Object;
 
   constructor() {
     this.baseUrls = new Set();
@@ -69,6 +136,18 @@ export class BoltClient {
         });
       }
     }, 10000);
+    const boltClient = this;
+    class FLoader extends BoltLoader {
+      static boltClient = boltClient;
+    }
+    class PLoader extends BoltPlaylistLoader {
+      static boltClient = boltClient;
+    }
+    this.hlsJsFLoader = FLoader;
+    this.hlsJsPLoader = PLoader;
+    this.hlsSubscriptionHandlers = new Map();
+    this.hlsSubscriptionTimeouts = new Map();
+    this.hlsLocalFiles = new LruCache({ max: 10 });
   }
 
   addServer(s:string) {
@@ -421,6 +500,37 @@ export class BoltClient {
     });
     this.idPromise = ipfs.id().then((ipfsResponse) => ipfsResponse.id);
     this.ipfs = ipfs;
+  }
+
+  updateHlsSubscriptions(path:string) {
+    const ipfs = this.ipfs;
+    if (!ipfs) {
+      return;
+    }
+    if (!this.hlsSubscriptionHandlers.has(path)) {
+      const handler = async ({ data }) => {
+        const [item, hash] = JSON.parse(data.toString());
+        ipfs.cat(hash).then((buffer:Uint8Array) => {
+          this.hlsLocalFiles.set(item, buffer);
+        });
+      };
+      this.hlsSubscriptionHandlers.set(path, handler);
+      try {
+        ipfs.pubsub.subscribe(`${path}:files`, handler);
+      } catch (error) {
+        console.log(error);
+      }
+    }
+    const timeout = this.hlsSubscriptionTimeouts.get(path);
+    clearTimeout(timeout);
+    this.hlsSubscriptionTimeouts.set(path, setTimeout(() => {
+      const handler = this.hlsSubscriptionHandlers.get(path);
+      if (handler) {
+        ipfs.pubsub.unsubscribe(`${path}:files`, handler);
+      }
+      this.hlsSubscriptionHandlers.delete(path);
+      this.hlsSubscriptionTimeouts.delete(path);
+    }, 30000));
   }
 }
 

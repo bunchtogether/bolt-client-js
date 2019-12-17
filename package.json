@@ -61,7 +61,10 @@
     "whatwg-fetch": "^3.0.0"
   },
   "dependencies": {
+    "hls.js": "^0.13.0",
     "libp2p-pnet": "^0.1.0",
+    "lodash": "^4.17.15",
+    "lru-cache": "^5.1.1",
     "p-queue": "^6.1.0",
     "request": "^2.88.0",
     "url-parse": "^1.4.7"
