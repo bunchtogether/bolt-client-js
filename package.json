@@ -37,7 +37,7 @@
     "@babel/preset-flow": "^7.0.0",
     "babel-eslint": "^9.0.0",
     "babel-jest": "^24.8.0",
-    "codecov": "^3.3.0",
+    "codecov": "^3.6.5",
     "cross-env": "^5.2.0",
     "documentation": "^12.0.1",
     "eslint": "^5.16.0",
