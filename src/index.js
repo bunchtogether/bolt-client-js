@@ -22,43 +22,52 @@ const getBoltOriginPath = memoize((url:string) => {
 class BoltLoader extends XhrLoader {
   load(context, config, callbacks) {
     const boltClient = this.constructor.boltClient;
-    let url = context.url;
+    let { url, responseType } = context;
     if (url.indexOf('origin/') === -1) {
       const originPath = getBoltOriginPath(url);
       url = context.url = boltClient.getUrl(originPath); // eslint-disable-line no-param-reassign
-      if (url.indexOf('.m3u8') !== -1) {
-        boltClient.updateHlsSubscriptions(originPath);
-      }
     }
     const parsed = new URL(url);
     const path = `${parsed.pathname.slice(1)}${parsed.search ? `${parsed.search}` : ''}`;
-    const hlsLocalFile = boltClient.hlsLocalFiles.get(path);
-    if (hlsLocalFile) {
+    const hlsLocalFilePromise = boltClient.hlsLocalFiles.get(path);
+    const { onSuccess } = callbacks;
+    if (hlsLocalFilePromise) {
       console.log('HIT', path);
-      const { onSuccess, responseType } = callbacks;
-      const now = performance.now();
-      let data;
-      let length;
-      if (responseType === 'arraybuffer') {
-        data = hlsLocalFile;
-        length = hlsLocalFile.byteLength;
-      } else {
-        data = hlsLocalFile.toString();
-        length = data.length;
-      }
-      onSuccess({
-        url,
-        data,
-      }, {
-        trequest: now,
-        tfirst: now,
-        tload: now,
-        loaded: length,
-        total: length,
-        retry: 0,
-      }, context, boltClient);
+      const start = performance.now();
+      hlsLocalFilePromise.then((hlsLocalFile) => {
+        const now = performance.now();
+        let data;
+        let length;
+        boltClient.ipfsBytes += hlsLocalFile.byteLength;
+        if (responseType === 'arraybuffer') {
+          data = hlsLocalFile;
+          length = hlsLocalFile.byteLength;
+        } else {
+          data = Buffer.from(hlsLocalFile).toString('utf8');
+          length = data.length;
+        }
+        onSuccess({
+          url,
+          data,
+        }, {
+          trequest: start,
+          tfirst: start,
+          tload: now,
+          loaded: length,
+          total: length,
+          retry: 0,
+        }, context, boltClient);
+      }).catch((error) => {
+        console.log('ERROR', error);
+      });
       return;
     }
+    console.log('MISS', path);
+
+    callbacks.onSuccess = (response, stats, context, xhr) => {
+      boltClient.proxyBytes += stats.total;
+      onSuccess(response, stats, context, xhr);
+    };
     super.load(context, config, callbacks);
   }
 }
@@ -69,7 +78,11 @@ class BoltPlaylistLoader extends BoltLoader {
     const boltClient = this.constructor.boltClient;
     const url = context.url;
     const parsed = new URL(url);
-    boltClient.updateHlsSubscriptions(`${parsed.pathname.slice(1)}${parsed.search ? `${parsed.search}` : ''}`);
+    try {
+      boltClient.updateHlsSubscriptions(`${parsed.pathname.slice(1)}${parsed.search ? `${parsed.search}` : ''}`);
+    } catch (error) {
+      console.error(error);
+    }
   }
 }
 
@@ -91,6 +104,8 @@ export class BoltClient {
   hlsLocalFiles: LruCache;
   hlsJsFLoader:Object;
   hlsJsPLoader:Object;
+  proxyBytes: number;
+  ipfsBytes: number;
 
   constructor() {
     this.baseUrls = new Set();
@@ -136,6 +151,27 @@ export class BoltClient {
         });
       }
     }, 10000);
+    setInterval(async () => {
+      console.log(`Proxy: ${Math.round(this.proxyBytes / 10485.76) / 1000} MB`);
+      console.log(`P2P: ${Math.round(this.ipfsBytes / 10485.76) / 1000} MB`);
+      const peers = await this.ipfs.swarm.peers();
+      let websocketInBytes = 0;
+      let webRtcInBytes = 0;
+      let websocketOutBytes = 0;
+      let webRtcOutBytes = 0;
+      for (const { addr, peer } of peers) {
+        const { totalIn, totalOut } = await this.ipfs.stats.bw({ peer: peer.toB58String() });
+        if (addr.toString().indexOf('webrtc') !== -1) {
+          webRtcInBytes += totalIn.toNumber();
+          webRtcOutBytes += totalOut.toNumber();
+        } else {
+          websocketInBytes += totalIn.toNumber();
+          websocketOutBytes += totalOut.toNumber();
+        }
+      }
+      console.log(`Websocket: ${Math.round(websocketInBytes / 10485.76) / 1000} MB In, ${Math.round(websocketOutBytes / 10485.76) / 1000} MB Out`);
+      console.log(`WebRTC: ${Math.round(webRtcInBytes / 10485.76) / 1000} MB In, ${Math.round(webRtcOutBytes / 10485.76) / 1000} MB Out`);
+    }, 10000);
     const boltClient = this;
     class FLoader extends BoltLoader {
       static boltClient = boltClient;
@@ -148,6 +184,8 @@ export class BoltClient {
     this.hlsSubscriptionHandlers = new Map();
     this.hlsSubscriptionTimeouts = new Map();
     this.hlsLocalFiles = new LruCache({ max: 10 });
+    this.proxyBytes = 0;
+    this.ipfsBytes = 0;
   }
 
   addServer(s:string) {
@@ -458,7 +496,6 @@ export class BoltClient {
         },
       },
       EXPERIMENTAL: {
-        pubsub: true,
         sharding: true,
         dht: true,
       },
@@ -468,7 +505,7 @@ export class BoltClient {
         },
         config: {
           dht: {
-            enabled: true,
+            enabled: false,
           },
         },
       },
@@ -500,37 +537,74 @@ export class BoltClient {
     });
     this.idPromise = ipfs.id().then((ipfsResponse) => ipfsResponse.id);
     this.ipfs = ipfs;
+    this.runGarbageCollection();
+    // $FlowFixMe
+    if ('storage' in navigator && 'estimate' in navigator.storage) {
+      setInterval(() => {
+        this.runGarbageCollection();
+      }, 60 * 1000);
+    } else {
+      setInterval(() => {
+        this.runGarbageCollection();
+      }, 60 * 60 * 1000);
+    }
   }
 
   updateHlsSubscriptions(path:string) {
     const ipfs = this.ipfs;
     if (!ipfs) {
+      console.log('NO IPFS');
       return;
     }
     if (!this.hlsSubscriptionHandlers.has(path)) {
       const handler = async ({ data }) => {
-        const [item, hash] = JSON.parse(data.toString());
-        ipfs.cat(hash).then((buffer:Uint8Array) => {
-          this.hlsLocalFiles.set(item, buffer);
-        });
+        const [item, hash, expires] = JSON.parse(data.toString());
+        const maxAge = expires ? expires - Date.now() : undefined;
+        if (maxAge < 0) {
+          return;
+        }
+        this.hlsLocalFiles.set(item, ipfs.cat(hash), maxAge);
       };
       this.hlsSubscriptionHandlers.set(path, handler);
-      try {
-        ipfs.pubsub.subscribe(`${path}:files`, handler);
-      } catch (error) {
-        console.log(error);
-      }
+      ipfs.pubsub.subscribe(`${path}:files`, handler).catch((error) => {
+        console.error(error);
+      });
     }
     const timeout = this.hlsSubscriptionTimeouts.get(path);
     clearTimeout(timeout);
     this.hlsSubscriptionTimeouts.set(path, setTimeout(() => {
       const handler = this.hlsSubscriptionHandlers.get(path);
       if (handler) {
-        ipfs.pubsub.unsubscribe(`${path}:files`, handler);
+        ipfs.pubsub.unsubscribe(`${path}:files`, handler).catch((error) => {
+          console.error(error);
+        });
       }
       this.hlsSubscriptionHandlers.delete(path);
       this.hlsSubscriptionTimeouts.delete(path);
     }, 30000));
+  }
+
+  async runGarbageCollection() {
+    const ipfs = this.ipfs;
+    if (!ipfs) {
+      return;
+    }
+    // $FlowFixMe
+    if ('storage' in navigator && 'estimate' in navigator.storage) {
+      // $FlowFixMe
+      const { usage, quota } = await navigator.storage.estimate();
+      console.log(`Using ${Math.round(10000 * usage / quota) / 100}% of ${Math.round(100 * quota / 1024 / 1024 / 1024) / 100} GB storage quota`);
+      if (usage < 5368709120 && (usage / quota) < 0.5) {
+        return;
+      }
+    }
+    console.log('Running IPFS garbage collection');
+    try {
+      await ipfs.repo.gc();
+    } catch (error) {
+      console.log('Unable to run IPFS garbage collection');
+      console.error(error);
+    }
   }
 }
 
