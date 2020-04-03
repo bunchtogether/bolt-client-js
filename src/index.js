@@ -58,7 +58,7 @@ export class BoltClient {
     this.ready = new Promise((resolve) => {
       this.readyCallback = () => resolve();
     });
-    this.throttledSaveVerifiedServers = debounce(this.saveVerifiedServers.bind(this), 250);
+    this.throttledSaveVerifiedServers = debounce(this.saveVerifiedServers.bind(this), 1000);
     this.loadStoredServers();
     this.isResetting = false;
     this.resetCount = 0;
@@ -93,7 +93,7 @@ export class BoltClient {
         await this.swarmSettingsPromise;
       }
       await AsyncStorage.removeItem('BOLT_SWARM_SETTINGS');
-      await AsyncStorage.removeItem('BOLT_SERVERS');
+      await AsyncStorage.removeItem('BOLT_SERVER_PRIORITY');
       delete this.swarmSettings;
       delete this.swarmSettingsPromise;
       this.preVerifiedServers = new Map();
@@ -110,21 +110,21 @@ export class BoltClient {
 
   async loadStoredServers() {
     try {
-      const storedServersString = await AsyncStorage.getItem('BOLT_SERVERS');
+      const storedServersString = await AsyncStorage.getItem('BOLT_SERVER_PRIORITY');
       if (storedServersString) {
         const storedServers = JSON.parse(storedServersString);
         if (storedServers.length > 0) {
           console.log('Stored Bolt server addresses:');
         }
-        for (const url of storedServers) {
-          console.log(`\t${url}`);
-          this.verifyServer(url, 1);
+        for (const [url, priority] of storedServers) {
+          console.log(`\t${url} (priority ${priority})`);
+          this.verifyServer(url, priority);
         }
       }
     } catch (error) {
       console.log('Unable to parse stored Bolt server addresses');
       console.error(error);
-      await AsyncStorage.removeItem('BOLT_SERVERS');
+      await AsyncStorage.removeItem('BOLT_SERVER_PRIORITY');
     }
   }
 
@@ -170,7 +170,7 @@ export class BoltClient {
 
   async saveVerifiedServers() {
     try {
-      await AsyncStorage.setItem('BOLT_SERVERS', JSON.stringify([...this.verifiedServers.keys()]));
+      await AsyncStorage.setItem('BOLT_SERVER_PRIORITY', JSON.stringify([...this.verifiedServers].map((x) => [x[0], x[1] === 0 ? 0 : 1])));
     } catch (error) {
       console.log('Unable to save Bolt servers to local storage');
       console.error(error);
@@ -194,13 +194,17 @@ export class BoltClient {
 
   async verifyServer(url:string, priority:number) {
     const verifiedServerPriority = this.verifiedServers.get(url);
-    if (typeof verifiedServerPriority === 'number' && verifiedServerPriority < priority) {
-      this.verifiedServers.set(url, priority);
+    if (typeof verifiedServerPriority === 'number') {
+      if (verifiedServerPriority < priority) {
+        this.verifiedServers.set(url, priority);
+      }
       return;
     }
     const preVerifiedServerPriority = this.preVerifiedServers.get(url);
-    if (typeof preVerifiedServerPriority === 'number' && preVerifiedServerPriority < priority) {
-      this.preVerifiedServers.set(url, priority);
+    if (typeof preVerifiedServerPriority === 'number') {
+      if (preVerifiedServerPriority < priority) {
+        this.preVerifiedServers.set(url, priority);
+      }
       return;
     }
     this.preVerifiedServers.set(url, priority);
@@ -215,6 +219,14 @@ export class BoltClient {
     if (!swarmSettings) {
       console.log('Unable to fetch swarm settings');
       return;
+    }
+    if (typeof this.readyCallback === 'function') {
+      this.readyCallback();
+      delete this.readyCallback;
+    }
+    if (priority === 0) {
+      this.verifiedServers.set(url, 0);
+      this.throttledSaveVerifiedServers();
     }
     let swarmKey;
     let hostnames;
@@ -244,12 +256,9 @@ export class BoltClient {
     }
     const storedPriority = this.preVerifiedServers.get(url) || priority;
     this.verifiedServers.set(url, storedPriority);
-    if (typeof this.readyCallback === 'function') {
-      this.readyCallback();
-      delete this.readyCallback;
-    }
+    this.preVerifiedServers.delete(url);
     for (const hostname of hostnames) {
-      this.verifyServer(`https://${hostname}`, 2);
+      this.verifyServer(normalizeUrl(`https://${hostname}`), 2);
     }
     console.log(`DEBUG: Verified seed server ${url} with priority ${storedPriority}`);
     this.throttledSaveVerifiedServers();
