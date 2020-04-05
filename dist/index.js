@@ -4,6 +4,7 @@ import Url from 'url-parse';
 import superagent from 'superagent';
 import { debounce } from 'lodash';
 import AsyncStorage from '@callstack/async-storage';
+import EventEmitter from 'events';
 
 class BoltUrlError extends Error {}
 
@@ -50,11 +51,13 @@ export class BoltClient {
                                            
                        
                      
+                   
 
   constructor() {
     this.seedServers = new Set();
     this.preVerifiedServers = new Map();
     this.verifiedServers = new Map();
+    this.isReady = false;
     this.ready = new Promise((resolve) => {
       this.readyCallback = () => resolve();
     });
@@ -66,15 +69,15 @@ export class BoltClient {
 
   getUrl(path       ) {
     if (this.verifiedServers.size > 0) {
-      return `${chooseServer(this.verifiedServers)}/${path}`;
+      return new URL(path, chooseServer(this.verifiedServers)).toString();
     }
     if (this.preVerifiedServers.size > 0) {
-      return `${chooseServer(this.preVerifiedServers)}/${path}`;
+      return new URL(path, chooseServer(this.preVerifiedServers)).toString();
     }
     if (this.seedServers.size > 0) {
       const urls = Array.from(this.seedServers);
       const url = urls[Math.floor(Math.random() * urls.length)];
-      return `${url}/${path}`;
+      return new URL(path, url).toString();
     }
     throw new BoltUrlError('No server URLs available');
   }
@@ -98,6 +101,10 @@ export class BoltClient {
       delete this.swarmSettingsPromise;
       this.preVerifiedServers = new Map();
       this.verifiedServers = new Map();
+      this.isReady = false;
+      this.ready = new Promise((resolve) => {
+        this.readyCallback = () => resolve();
+      });
       for (const url of this.seedServers) {
         this.verifyServer(url, 0);
       }
@@ -221,6 +228,7 @@ export class BoltClient {
       return;
     }
     if (typeof this.readyCallback === 'function') {
+      this.isReady = true;
       this.readyCallback();
       delete this.readyCallback;
     }
@@ -262,6 +270,125 @@ export class BoltClient {
     }
     console.log(`DEBUG: Verified seed server ${url} with priority ${storedPriority}`);
     this.throttledSaveVerifiedServers();
+  }
+
+  encodeFile(file     , jobId       , options                                                    ) {
+    const headers        = {
+      'Content-Type': file.type,
+    };
+    if (options && options.encryption) {
+      const { key, iv, url } = options.encryption;
+      if (typeof key === 'string' && typeof iv === 'string' && typeof url === 'string') {
+        headers['x-encryption-url'] = url;
+        headers['x-encryption-key'] = key;
+        headers['x-encryption-iv'] = iv;
+      } else {
+        throw new Error('Invalid encryption parameters');
+      }
+    }
+    const start = Date.now();
+    const emitter = new EventEmitter();
+    const putUrl = this.getUrl(`api/1.0/hls-encode/${jobId}/${encodeURIComponent(file.name)}`);
+    const put = superagent.put(putUrl).set(headers).send(file);
+    const getUrl = this.getUrl(`api/1.0/hls-encode/${jobId}/streams`);
+    const get = superagent.get(getUrl);
+    const getPromise = get.then((result) => result.body);
+    const status        = {
+      status: 'probe',
+      duration: 0,
+      uploaded: 0,
+      size: file.size,
+    };
+    setImmediate(() => {
+      Object.assign(status, { duration: Date.now() - start });
+      emitter.emit('status', status);
+    });
+    let errorEmitted = false;
+    let isComplete = false;
+    const updateStatus = async () => {
+      const url = this.getUrl(`api/1.0/hls-encode/${jobId}`);
+      while (true) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        if (errorEmitted || isComplete) {
+          return;
+        }
+        try {
+          const { body } = await superagent.get(url);
+          Object.assign(status, body, { duration: Date.now() - start });
+          emitter.emit('status', status);
+          if (body.status === 'complete') {
+            isComplete = true;
+            return;
+          }
+          if (body.status === 'error') {
+            errorEmitted = true;
+            emitter.emit('error', new Error(`Bolt encode job ${jobId} (${file.name}) error`));
+            return;
+          }
+        } catch (error) {
+          console.log(`Bolt encode job ${jobId} (${file.name}) status request error`);
+          console.error(error);
+          emitter.emit('error', error);
+          return;
+        }
+      }
+    };
+    put.on('progress', (event       ) => {
+      if (event.direction === 'upload') {
+        Object.assign(status, {
+          duration: Date.now() - start,
+          uploaded: event.loaded,
+        });
+        emitter.emit('status', status);
+      }
+    });
+    get.catch((error) => {
+      errorEmitted = true;
+      console.log(`Bolt encode job ${jobId} (${file.name}) stream request error`);
+      console.error(error);
+      if (errorEmitted || isComplete) {
+        return;
+      }
+      emitter.emit('error', error);
+    });
+    put.catch((error) => {
+      errorEmitted = true;
+      console.log(`Bolt encode job ${jobId} (${file.name}) upload error`);
+      console.error(error);
+      if (errorEmitted || isComplete) {
+        return;
+      }
+      emitter.emit('error', error);
+    });
+    getPromise.then((body) => {
+      if (errorEmitted || isComplete) {
+        return;
+      }
+      Object.assign(status, body, { duration: Date.now() - start });
+      emitter.emit('status', status);
+      if (body.status === 'error') {
+        errorEmitted = true;
+        emitter.emit('error', new Error(`Bolt encode job ${jobId} (${file.name}) error`));
+      } else if (body.status === 'complete') {
+        isComplete = true;
+      }
+    });
+    put.then(({ body }) => {
+      if (errorEmitted || isComplete) {
+        return;
+      }
+      Object.assign(status, body, { duration: Date.now() - start });
+      emitter.emit('status', status);
+      if (body.status === 'error') {
+        errorEmitted = true;
+        emitter.emit('error', new Error(`Bolt encode job ${jobId} (${file.name}) error`));
+      } else if (body.status === 'complete') {
+        isComplete = true;
+      }
+      updateStatus();
+    });
+
+    return [getPromise, emitter];
   }
 
   startIpfs() {
