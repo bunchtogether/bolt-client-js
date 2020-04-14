@@ -13,17 +13,13 @@
     "lint:js": "eslint -c ./.eslintrc --no-eslintrc --fix --cache .",
     "lint:flow": "flow --show-all-errors",
     "coverage": "codecov",
-    "start-pre-commit": "git stash push -q --keep-index",
-    "end-pre-commit": "git add -u && git stash pop",
-    "documentation": "documentation readme src/index.js --section='API'"
+    "documentation": "documentation readme dist/index.js --section='API'"
   },
-  "pre-commit": [
-    "lint",
-    "start-pre-commit",
-    "build",
-    "documentation",
-    "end-pre-commit"
-  ],
+  "husky": {
+    "hooks": {
+      "pre-commit": "yarn lint && yarn documentation && yarn build && git add dist ./README.md"
+    }
+  },
   "jest": {
     "coverageDirectory": "./coverage/",
     "collectCoverage": true,
@@ -33,37 +29,40 @@
     ]
   },
   "devDependencies": {
-    "@babel/preset-env": "^7.4.5",
-    "@babel/preset-flow": "^7.0.0",
-    "babel-eslint": "^9.0.0",
-    "babel-jest": "^24.8.0",
-    "codecov": "^3.3.0",
-    "cross-env": "^5.2.0",
-    "documentation": "^12.0.1",
-    "eslint": "^5.16.0",
+    "@babel/core": "^7.9.0",
+    "@babel/plugin-proposal-class-properties": "^7.8.3",
+    "@babel/plugin-transform-flow-strip-types": "^7.9.0",
+    "@babel/preset-env": "^7.9.5",
+    "@babel/preset-flow": "^7.9.0",
+    "babel-eslint": "^10.1.0",
+    "babel-jest": "^25.3.0",
+    "codecov": "^3.6.5",
+    "cross-env": "^7.0.2",
+    "documentation": "^12.3.0",
+    "eslint": "^6.8.0",
     "eslint-config-bunchtogether": "^1.1.6",
-    "eslint-plugin-flowtype": "^3.5.1",
-    "eslint-plugin-flowtype-errors": "^4.1.0",
-    "eslint-plugin-import": "^2.16.0",
-    "eslint-plugin-jest": "^22.4.1",
-    "eslint-plugin-jsx-a11y": "^6.2.1",
-    "eslint-plugin-react": "^7.12.4",
-    "expect": "^24.7.0",
+    "eslint-plugin-flowtype": "^4.7.0",
+    "eslint-plugin-flowtype-errors": "^4.2.0",
+    "eslint-plugin-import": "^2.20.2",
+    "eslint-plugin-jest": "^23.8.2",
+    "eslint-plugin-jsx-a11y": "^6.2.3",
+    "eslint-plugin-react": "^7.19.0",
+    "expect": "^25.3.0",
     "exports-loader": "^0.7.0",
-    "flow-bin": "^0.102.0",
-    "flow-copy-source": "^2.0.3",
-    "flow-remove-types": "^2.102.0-rc",
-    "flow-typed": "^2.5.1",
-    "jest": "^24.7.0",
-    "jest-diff": "^24.7.0",
-    "jest-flow-transform": "^1.0.1",
-    "pre-commit": "^1.2.2",
-    "whatwg-fetch": "^3.0.0"
+    "flow-bin": "^0.122.0",
+    "flow-copy-source": "^2.0.9",
+    "flow-remove-types": "^2.122.0",
+    "flow-typed": "^3.1.0",
+    "jest": "^25.3.0",
+    "jest-diff": "^25.3.0",
+    "whatwg-fetch": "^3.0.0",
+    "husky": "^4.2.5"
   },
   "dependencies": {
     "@callstack/async-storage": "^2.0.3",
     "lodash": "^4.17.15",
-    "p-queue": "^6.1.0",
+    "p-queue": "^6.3.0",
+    "simple-peer": "^9.6.2",
     "superagent": "^5.2.2",
     "url-parse": "^1.4.7"
   }

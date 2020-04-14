@@ -5,6 +5,7 @@ import superagent from 'superagent';
 import { debounce } from 'lodash';
 import AsyncStorage from '@callstack/async-storage';
 import EventEmitter from 'events';
+import Peer from 'simple-peer';
 
 class BoltUrlError extends Error {}
 
@@ -36,22 +37,52 @@ const chooseServer = (serverMap:Map<string, number>) => {
   return maxPriorityServers[Math.floor(Math.random() * maxPriorityServers.length)];
 };
 
+const debouncePrintIps = debounce(() => {
+  if (localIps.size > 0) {
+    console.log('Discovered local network addresses:');
+    for (const localIp of localIps) {
+      console.log(`\t${localIp}`);
+    }
+  }
+}, 500);
+
+const localIps = new Set();
+
+try {
+  const peer = new Peer({
+    initiator: true,
+    trickle: true,
+    iceServers: [],
+  });
+  peer.on('signal', (data) => {
+    const { candidate } = data;
+    if (candidate && candidate.candidate) {
+      localIps.add(candidate.candidate.split(' ')[4]);
+      debouncePrintIps();
+    }
+  });
+} catch (error) {
+  console.log('Unable to discover local network addresses');
+  console.error(error);
+}
+
+
 /**
  * Class representing a Bolt Client
  */
 export class BoltClient {
-  swarmKey: string;
-  ready: Promise<void>;
-  readyCallback: void | () => void;
-  swarmSettingsPromise: Promise<Object> | void;
-  swarmSettings: Object;
-  seedServers: Set<string>;
-  preVerifiedServers: Map<string, number>;
-  verifiedServers: Map<string, number>;
-  throttledSaveVerifiedServers: () => void;
-  isResetting: boolean;
-  resetCount: number;
-  isReady: boolean;
+  declare swarmKey: string;
+  declare ready: Promise<void>;
+  declare readyCallback: void | () => void;
+  declare swarmSettingsPromise: Promise<Object> | void;
+  declare swarmSettings: Object;
+  declare seedServers: Set<string>;
+  declare preVerifiedServers: Map<string, number>;
+  declare verifiedServers: Map<string, number>;
+  declare throttledSaveVerifiedServers: () => void;
+  declare isResetting: boolean;
+  declare resetCount: number;
+  declare isReady: boolean;
 
   constructor() {
     this.seedServers = new Set();
@@ -200,6 +231,7 @@ export class BoltClient {
   }
 
   async verifyServer(url:string, priority:number) {
+    console.log(`VERIFY ${url}`);
     const verifiedServerPriority = this.verifiedServers.get(url);
     if (typeof verifiedServerPriority === 'number') {
       if (verifiedServerPriority < priority) {
@@ -387,7 +419,6 @@ export class BoltClient {
       }
       updateStatus();
     });
-
     return [getPromise, emitter];
   }
 
