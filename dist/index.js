@@ -5,7 +5,6 @@ import superagent from 'superagent';
 import { debounce } from 'lodash';
 import AsyncStorage from '@callstack/async-storage';
 import EventEmitter from 'events';
-import Peer from 'simple-peer';
 
 class BoltUrlError extends Error {}
 
@@ -36,36 +35,6 @@ const chooseServer = (serverMap                    ) => {
   const maxPriorityServers = servers.filter((x) => x[1] === maxPriority).map((x) => x[0]);
   return maxPriorityServers[Math.floor(Math.random() * maxPriorityServers.length)];
 };
-
-const debouncePrintIps = debounce(() => {
-  if (localIps.size > 0) {
-    console.log('Discovered local network addresses:');
-    for (const localIp of localIps) {
-      console.log(`\t${localIp}`);
-    }
-  }
-}, 500);
-
-const localIps = new Set();
-
-try {
-  const peer = new Peer({
-    initiator: true,
-    trickle: true,
-    iceServers: [],
-  });
-  peer.on('signal', (data) => {
-    const { candidate } = data;
-    if (candidate && candidate.candidate) {
-      localIps.add(candidate.candidate.split(' ')[4]);
-      debouncePrintIps();
-    }
-  });
-} catch (error) {
-  console.log('Unable to discover local network addresses');
-  console.error(error);
-}
-
 
 /**
  * Class representing a Bolt Client
