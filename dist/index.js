@@ -304,7 +304,7 @@ export class BoltClient {
     this.throttledSaveVerifiedServers();
   }
 
-  encodeFile(file     , jobId       , options                                                    ) {
+  encodeFile(file     , jobId       , options                                                                         ) {
     const headers        = {
       'Content-Type': file.type,
     };
@@ -317,6 +317,9 @@ export class BoltClient {
       } else {
         throw new Error('Invalid encryption parameters');
       }
+    }
+    if (options && options.caption) {
+      headers['x-caption'] = '1';
     }
     const start = Date.now();
     const emitter = new EventEmitter();
