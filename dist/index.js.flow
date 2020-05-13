@@ -137,11 +137,9 @@ export class BoltClient {
 
   async getSwarmSettings(url:string) {
     if (this.swarmSettings) {
-      console.log('DEBUG: Got existing swarm settings');
       return this.swarmSettings;
     }
     if (this.swarmSettingsPromise) {
-      console.log('DEBUG: Got swarm settings promise');
       return this.swarmSettingsPromise;
     }
     const storedSwarmSettingsString = await AsyncStorage.getItem('BOLT_SWARM_SETTINGS');
@@ -149,7 +147,6 @@ export class BoltClient {
       try {
         const swarmSettings = JSON.parse(storedSwarmSettingsString);
         this.swarmSettings = swarmSettings;
-        console.log('DEBUG: Got stored BOLT_SWARM_SETTINGS');
         return swarmSettings;
       } catch (error) {
         console.log('Unable to parse stored Bolt swarm settings');
@@ -163,7 +160,6 @@ export class BoltClient {
         delete this.swarmSettingsPromise;
         await AsyncStorage.setItem('BOLT_SWARM_SETTINGS', JSON.stringify(swarmSettings));
         this.swarmSettings = swarmSettings;
-        console.log(`DEBUG: Got swarm settings from ${url}`);
         return swarmSettings;
       } catch (error) {
         delete this.swarmSettingsPromise;
@@ -191,7 +187,6 @@ export class BoltClient {
         return;
       }
       this.seedServers.add(url);
-      console.log(`DEBUG: Added seed server ${url}`);
       this.verifyServer(url, 0);
     } catch (error) {
       console.log(`Unable to add server ${s}`);
@@ -269,11 +264,10 @@ export class BoltClient {
     for (const hostname of hostnames) {
       this.verifyServer(normalizeUrl(`https://${hostname}`), 2);
     }
-    console.log(`DEBUG: Verified seed server ${url} with priority ${storedPriority}`);
     this.throttledSaveVerifiedServers();
   }
 
-  encodeFile(file:File, jobId:string, options?: {encryption?: {key:string, iv:string, url:string}, caption?: boolean }) {
+  encodeFile(file:File | Blob, name:string, jobId:string, options?: {encryption?: {key:string, iv:string, url:string}, caption?: boolean }) {
     const headers:Object = {
       'Content-Type': file.type,
     };
@@ -292,11 +286,8 @@ export class BoltClient {
     }
     const start = Date.now();
     const emitter = new EventEmitter();
-    const putUrl = this.getUrl(`api/1.0/hls-encode/${jobId}/${encodeURIComponent(file.name)}`);
+    const putUrl = this.getUrl(`api/1.0/hls-encode/${jobId}/${encodeURIComponent(name)}`);
     const put = superagent.put(putUrl).set(headers).send(file);
-    const getUrl = this.getUrl(`api/1.0/hls-encode/${jobId}/streams`);
-    const get = superagent.get(getUrl);
-    const getPromise = get.then((result) => result.body);
     const status:Object = {
       status: 'probe',
       duration: 0,
@@ -326,11 +317,11 @@ export class BoltClient {
           }
           if (body.status === 'error') {
             errorEmitted = true;
-            emitter.emit('error', new Error(`Bolt encode job ${jobId} (${file.name}) error`));
+            emitter.emit('error', new Error(`Bolt encode job ${jobId} (${name}) error`));
             return;
           }
         } catch (error) {
-          console.log(`Bolt encode job ${jobId} (${file.name}) status request error`);
+          console.log(`Bolt encode job ${jobId} (${name}) status request error`);
           console.error(error);
           emitter.emit('error', error);
           return;
@@ -346,36 +337,14 @@ export class BoltClient {
         emitter.emit('status', status);
       }
     });
-    get.catch((error) => {
-      errorEmitted = true;
-      console.log(`Bolt encode job ${jobId} (${file.name}) stream request error`);
-      console.error(error);
-      if (errorEmitted || isComplete) {
-        return;
-      }
-      emitter.emit('error', error);
-    });
     put.catch((error) => {
       errorEmitted = true;
-      console.log(`Bolt encode job ${jobId} (${file.name}) upload error`);
+      console.log(`Bolt encode job ${jobId} (${name}) upload error`);
       console.error(error);
       if (errorEmitted || isComplete) {
         return;
       }
       emitter.emit('error', error);
-    });
-    getPromise.then((body) => {
-      if (errorEmitted || isComplete) {
-        return;
-      }
-      Object.assign(status, body, { duration: Date.now() - start });
-      emitter.emit('status', status);
-      if (body.status === 'error') {
-        errorEmitted = true;
-        emitter.emit('error', new Error(`Bolt encode job ${jobId} (${file.name}) error`));
-      } else if (body.status === 'complete') {
-        isComplete = true;
-      }
     });
     put.then(({ body }) => {
       if (errorEmitted || isComplete) {
@@ -385,13 +354,13 @@ export class BoltClient {
       emitter.emit('status', status);
       if (body.status === 'error') {
         errorEmitted = true;
-        emitter.emit('error', new Error(`Bolt encode job ${jobId} (${file.name}) error`));
+        emitter.emit('error', new Error(`Bolt encode job ${jobId} (${name}) error`));
       } else if (body.status === 'complete') {
         isComplete = true;
       }
       updateStatus();
     });
-    return [getPromise, emitter];
+    return emitter;
   }
 
   startIpfs() {
