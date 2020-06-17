@@ -4,7 +4,7 @@ import Url from 'url-parse';
 import superagent from 'superagent';
 import { debounce } from 'lodash';
 import AsyncStorage from '@callstack/async-storage';
-import EventEmitter from 'events';
+import baseLogger from './logger';
 
 class BoltUrlError extends Error {}
 
@@ -36,6 +36,14 @@ const chooseServer = (serverMap                    ) => {
   return maxPriorityServers[Math.floor(Math.random() * maxPriorityServers.length)];
 };
 
+               
+                                           
+                                          
+                                          
+                                           
+                                                
+  
+
 /**
  * Class representing a Bolt Client
  */
@@ -52,8 +60,9 @@ export class BoltClient {
                                
                              
                            
+                         
 
-  constructor() {
+  constructor(logger          = baseLogger) {
     this.seedServers = new Set();
     this.preVerifiedServers = new Map();
     this.verifiedServers = new Map();
@@ -65,6 +74,7 @@ export class BoltClient {
     this.loadStoredServers();
     this.isResetting = false;
     this.resetCount = 0;
+    this.logger = logger;
   }
 
   getUrl(path       ) {
@@ -87,7 +97,8 @@ export class BoltClient {
       return;
     }
     if (this.resetCount > 5) {
-      console.log(`Bolt skipping reset after ${this.resetCount} attempts`);
+      this.logger.warn(`Bolt skipping reset after ${this.resetCount} attempts`);
+      return;
     }
     try {
       this.isResetting = true;
@@ -109,8 +120,8 @@ export class BoltClient {
         this.verifyServer(url, 0);
       }
     } catch (error) {
-      console.log('Error during Bolt client reset');
-      console.error(error);
+      this.logger.error('Error during Bolt client reset');
+      this.logger.errorStack(error);
     }
     this.isResetting = false;
   }
@@ -121,16 +132,16 @@ export class BoltClient {
       if (storedServersString) {
         const storedServers = JSON.parse(storedServersString);
         if (storedServers.length > 0) {
-          console.log('Stored Bolt server addresses:');
+          this.logger.info('Stored Bolt server addresses:');
         }
         for (const [url, priority] of storedServers) {
-          console.log(`\t${url} (priority ${priority})`);
+          this.logger.info(`\t${url} (priority ${priority})`);
           this.verifyServer(url, priority);
         }
       }
     } catch (error) {
-      console.log('Unable to parse stored Bolt server addresses');
-      console.error(error);
+      this.logger.error('Unable to parse stored Bolt server addresses');
+      this.logger.errorStack(error);
       await AsyncStorage.removeItem('BOLT_SERVER_PRIORITY');
     }
   }
@@ -149,8 +160,8 @@ export class BoltClient {
         this.swarmSettings = swarmSettings;
         return swarmSettings;
       } catch (error) {
-        console.log('Unable to parse stored Bolt swarm settings');
-        console.error(error);
+        this.logger.error('Unable to parse stored Bolt swarm settings');
+        this.logger.errorStack(error);
         await AsyncStorage.removeItem('BOLT_SWARM_SETTINGS');
       }
     }
@@ -163,8 +174,8 @@ export class BoltClient {
         return swarmSettings;
       } catch (error) {
         delete this.swarmSettingsPromise;
-        console.log('Unable to fetch stored Bolt swarm settings');
-        console.error(error);
+        this.logger.error('Unable to fetch stored Bolt swarm settings');
+        this.logger.errorStack(error);
         throw error;
       }
     })();
@@ -175,8 +186,8 @@ export class BoltClient {
     try {
       await AsyncStorage.setItem('BOLT_SERVER_PRIORITY', JSON.stringify([...this.verifiedServers].map((x) => [x[0], x[1] === 0 ? 0 : 1])));
     } catch (error) {
-      console.log('Unable to save Bolt servers to local storage');
-      console.error(error);
+      this.logger.error('Unable to save Bolt servers to local storage');
+      this.logger.errorStack(error);
     }
   }
 
@@ -189,13 +200,12 @@ export class BoltClient {
       this.seedServers.add(url);
       this.verifyServer(url, 0);
     } catch (error) {
-      console.log(`Unable to add server ${s}`);
-      console.error(error);
+      this.logger.error(`Unable to add server ${s}`);
+      this.logger.errorStack(error);
     }
   }
 
   async verifyServer(url       , priority       ) {
-    console.log(`VERIFY ${url}`);
     const verifiedServerPriority = this.verifiedServers.get(url);
     if (typeof verifiedServerPriority === 'number') {
       if (verifiedServerPriority < priority) {
@@ -210,17 +220,18 @@ export class BoltClient {
       }
       return;
     }
+    this.logger.info(`Verifying ${url}`);
     this.preVerifiedServers.set(url, priority);
     let swarmSettings;
     try {
       swarmSettings = await this.getSwarmSettings(url);
     } catch (error) {
-      console.log('Unable to fetch swarm settings');
-      console.error(error);
+      this.logger.error('Unable to fetch swarm settings');
+      this.logger.errorStack(error);
       return;
     }
     if (!swarmSettings) {
-      console.log('Unable to fetch swarm settings');
+      this.logger.error('Unable to fetch swarm settings');
       return;
     }
     if (typeof this.readyCallback === 'function') {
@@ -241,20 +252,20 @@ export class BoltClient {
     } catch (error) {
       this.verifiedServers.delete(url);
       this.preVerifiedServers.delete(url);
-      console.log('Unable to fetch Bolt swarm settings');
-      console.error(error);
+      this.logger.error('Unable to fetch Bolt swarm settings');
+      this.logger.errorStack(error);
       return;
     }
     if (typeof swarmKey !== 'string') {
-      console.log('Bolt hostnames request did not return swarm key');
+      this.logger.error('Bolt hostnames request did not return swarm key');
       return;
     }
     if (!Array.isArray(hostnames)) {
-      console.log('Bolt hostnames request did not return hostnames array');
+      this.logger.error('Bolt hostnames request did not return hostnames array');
       return;
     }
     if (swarmSettings.swarmKey !== swarmKey) {
-      console.log(`Bolt swarm key does not match for ${url}`);
+      this.logger.error(`Bolt swarm key does not match for ${url}`);
       this.reset();
       return;
     }
@@ -265,102 +276,6 @@ export class BoltClient {
       this.verifyServer(normalizeUrl(`https://${hostname}`), 2);
     }
     this.throttledSaveVerifiedServers();
-  }
-
-  encodeFile(file            , name       , jobId       , options                                                                         ) {
-    const headers        = {
-      'Content-Type': file.type,
-    };
-    if (options && options.encryption) {
-      const { key, iv, url } = options.encryption;
-      if (typeof key === 'string' && typeof iv === 'string' && typeof url === 'string') {
-        headers['x-encryption-url'] = url;
-        headers['x-encryption-key'] = key;
-        headers['x-encryption-iv'] = iv;
-      } else {
-        throw new Error('Invalid encryption parameters');
-      }
-    }
-    if (options && options.caption) {
-      headers['x-caption'] = '1';
-    }
-    const start = Date.now();
-    const emitter = new EventEmitter();
-    const putUrl = this.getUrl(`api/1.0/hls-encode/${jobId}/${encodeURIComponent(name)}`);
-    const put = superagent.put(putUrl).set(headers).send(file);
-    const status        = {
-      status: 'probe',
-      duration: 0,
-      uploaded: 0,
-      size: file.size,
-    };
-    setImmediate(() => {
-      Object.assign(status, { duration: Date.now() - start });
-      emitter.emit('status', status);
-    });
-    let errorEmitted = false;
-    let isComplete = false;
-    const updateStatus = async () => {
-      const url = this.getUrl(`api/1.0/hls-encode/${jobId}`);
-      while (true) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        if (errorEmitted || isComplete) {
-          return;
-        }
-        try {
-          const { body } = await superagent.get(url);
-          Object.assign(status, body, { duration: Date.now() - start });
-          emitter.emit('status', status);
-          if (body.status === 'complete') {
-            isComplete = true;
-            return;
-          }
-          if (body.status === 'error') {
-            errorEmitted = true;
-            emitter.emit('error', new Error(`Bolt encode job ${jobId} (${name}) error`));
-            return;
-          }
-        } catch (error) {
-          console.log(`Bolt encode job ${jobId} (${name}) status request error`);
-          console.error(error);
-          emitter.emit('error', error);
-          return;
-        }
-      }
-    };
-    put.on('progress', (event       ) => {
-      if (event.direction === 'upload') {
-        Object.assign(status, {
-          duration: Date.now() - start,
-          uploaded: event.loaded,
-        });
-        emitter.emit('status', status);
-      }
-    });
-    put.catch((error) => {
-      errorEmitted = true;
-      console.log(`Bolt encode job ${jobId} (${name}) upload error`);
-      console.error(error);
-      if (errorEmitted || isComplete) {
-        return;
-      }
-      emitter.emit('error', error);
-    });
-    put.then(({ body }) => {
-      if (errorEmitted || isComplete) {
-        return;
-      }
-      Object.assign(status, body, { duration: Date.now() - start });
-      emitter.emit('status', status);
-      if (body.status === 'error') {
-        errorEmitted = true;
-        emitter.emit('error', new Error(`Bolt encode job ${jobId} (${name}) error`));
-      } else if (body.status === 'complete') {
-        isComplete = true;
-      }
-      updateStatus();
-    });
-    return emitter;
   }
 
   startIpfs() {
