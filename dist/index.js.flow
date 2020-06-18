@@ -2,11 +2,12 @@
 
 import Url from 'url-parse';
 import superagent from 'superagent';
-import { debounce } from 'lodash';
+import { debounce, shuffle } from 'lodash';
 import AsyncStorage from '@callstack/async-storage';
 import baseLogger from './logger';
 
 class BoltUrlError extends Error {}
+class BoltVerificationError extends Error {}
 
 const normalizeUrl = (s:string) => {
   const { protocol, slashes, username, password, hostname, port } = new Url(s);
@@ -51,9 +52,8 @@ export class BoltClient {
   declare swarmKey: string;
   declare ready: Promise<void>;
   declare readyCallback: void | () => void;
-  declare swarmSettingsPromise: Promise<Object> | void;
-  declare swarmSettings: Object;
   declare seedServers: Set<string>;
+  declare storedServers: Set<string>;
   declare preVerifiedServers: Map<string, number>;
   declare verifiedServers: Map<string, number>;
   declare throttledSaveVerifiedServers: () => void;
@@ -61,9 +61,12 @@ export class BoltClient {
   declare resetCount: number;
   declare isReady: boolean;
   declare logger: Logger;
+  declare swarmKey: string | void;
+  declare skipPriorityZeroServers: boolean;
 
-  constructor(logger?: Logger = baseLogger) {
+  constructor() {
     this.seedServers = new Set();
+    this.storedServers = new Set();
     this.preVerifiedServers = new Map();
     this.verifiedServers = new Map();
     this.isReady = false;
@@ -74,20 +77,22 @@ export class BoltClient {
     this.loadStoredServers();
     this.isResetting = false;
     this.resetCount = 0;
-    this.logger = logger;
+    this.logger = baseLogger;
+    this.skipPriorityZeroServers = false;
   }
 
   getUrl(path:string) {
     if (this.verifiedServers.size > 0) {
-      return new URL(path, chooseServer(this.verifiedServers)).toString();
+      if (!this.skipPriorityZeroServers || Math.max(...[...this.verifiedServers].map((x) => x[1])) !== 0) {
+        return new URL(path, chooseServer(this.verifiedServers)).toString();
+      }
     }
-    if (this.preVerifiedServers.size > 0) {
-      return new URL(path, chooseServer(this.preVerifiedServers)).toString();
-    }
-    if (this.seedServers.size > 0) {
-      const urls = Array.from(this.seedServers);
-      const url = urls[Math.floor(Math.random() * urls.length)];
-      return new URL(path, url).toString();
+    if (!this.skipPriorityZeroServers) {
+      if (this.seedServers.size > 0) {
+        const urls = Array.from(this.seedServers);
+        const url = urls[Math.floor(Math.random() * urls.length)];
+        return new URL(path, url).toString();
+      }
     }
     throw new BoltUrlError('No server URLs available');
   }
@@ -103,13 +108,7 @@ export class BoltClient {
     try {
       this.isResetting = true;
       this.resetCount += 1;
-      if (this.swarmSettingsPromise) {
-        await this.swarmSettingsPromise;
-      }
-      await AsyncStorage.removeItem('BOLT_SWARM_SETTINGS');
       await AsyncStorage.removeItem('BOLT_SERVER_PRIORITY');
-      delete this.swarmSettings;
-      delete this.swarmSettingsPromise;
       this.preVerifiedServers = new Map();
       this.verifiedServers = new Map();
       this.isReady = false;
@@ -117,7 +116,12 @@ export class BoltClient {
         this.readyCallback = () => resolve();
       });
       for (const url of this.seedServers) {
-        this.verifyServer(url, 0);
+        try {
+          await this.verifyServer(url, 0);
+        } catch (error) {
+          this.logger.error(`Unable to verify seed server ${url}`);
+          this.logger.errorStack(error);
+        }
       }
     } catch (error) {
       this.logger.error('Error during Bolt client reset');
@@ -130,13 +134,22 @@ export class BoltClient {
     try {
       const storedServersString = await AsyncStorage.getItem('BOLT_SERVER_PRIORITY');
       if (storedServersString) {
-        const storedServers = JSON.parse(storedServersString);
+        const storedServers = shuffle(JSON.parse(storedServersString));
+        storedServers.sort((x, y) => y[1] - x[1]);
         if (storedServers.length > 0) {
           this.logger.info('Stored Bolt server addresses:');
         }
         for (const [url, priority] of storedServers) {
+          this.storedServers.add(url);
           this.logger.info(`\t${url} (priority ${priority})`);
-          this.verifyServer(url, priority);
+        }
+        for (const [url, priority] of storedServers) {
+          try {
+            await this.verifyServer(url, priority);
+          } catch (error) {
+            this.logger.error(`Unable to verify ${url} (priority ${priority})`);
+            this.logger.errorStack(error);
+          }
         }
       }
     } catch (error) {
@@ -144,42 +157,6 @@ export class BoltClient {
       this.logger.errorStack(error);
       await AsyncStorage.removeItem('BOLT_SERVER_PRIORITY');
     }
-  }
-
-  async getSwarmSettings(url:string) {
-    if (this.swarmSettings) {
-      return this.swarmSettings;
-    }
-    if (this.swarmSettingsPromise) {
-      return this.swarmSettingsPromise;
-    }
-    const storedSwarmSettingsString = await AsyncStorage.getItem('BOLT_SWARM_SETTINGS');
-    if (storedSwarmSettingsString) {
-      try {
-        const swarmSettings = JSON.parse(storedSwarmSettingsString);
-        this.swarmSettings = swarmSettings;
-        return swarmSettings;
-      } catch (error) {
-        this.logger.error('Unable to parse stored Bolt swarm settings');
-        this.logger.errorStack(error);
-        await AsyncStorage.removeItem('BOLT_SWARM_SETTINGS');
-      }
-    }
-    this.swarmSettingsPromise = (async () => {
-      try {
-        const { body: swarmSettings } = await superagent.get(`${url}/api/1.0/swarm`);
-        delete this.swarmSettingsPromise;
-        await AsyncStorage.setItem('BOLT_SWARM_SETTINGS', JSON.stringify(swarmSettings));
-        this.swarmSettings = swarmSettings;
-        return swarmSettings;
-      } catch (error) {
-        delete this.swarmSettingsPromise;
-        this.logger.error('Unable to fetch stored Bolt swarm settings');
-        this.logger.errorStack(error);
-        throw error;
-      }
-    })();
-    return this.swarmSettingsPromise;
   }
 
   async saveVerifiedServers() {
@@ -192,24 +169,31 @@ export class BoltClient {
   }
 
   addServer(s:string) {
-    try {
-      const url = normalizeUrl(s);
-      if (this.seedServers.has(url)) {
-        return;
-      }
-      this.seedServers.add(url);
-      this.verifyServer(url, 0);
-    } catch (error) {
-      this.logger.error(`Unable to add server ${s}`);
-      this.logger.errorStack(error);
+    const url = normalizeUrl(s);
+    if (this.seedServers.has(url)) {
+      return;
     }
+    if (this.storedServers.has(url)) {
+      return;
+    }
+    this.seedServers.add(url);
+    this.verifyServer(url, 0).catch((error) => {
+      this.logger.error(`Unable to verify seed server ${url}`);
+      this.logger.errorStack(error);
+    });
   }
 
   async verifyServer(url:string, priority:number) {
+    const maxExistingPriority = Math.max(...this.verifiedServers.values());
+    if (maxExistingPriority > priority) {
+      this.logger.info(`Not verifying ${url}, verified server with priority ${maxExistingPriority} already exists`);
+      return;
+    }
     const verifiedServerPriority = this.verifiedServers.get(url);
     if (typeof verifiedServerPriority === 'number') {
       if (verifiedServerPriority < priority) {
         this.verifiedServers.set(url, priority);
+        this.throttledSaveVerifiedServers();
       }
       return;
     }
@@ -222,27 +206,6 @@ export class BoltClient {
     }
     this.logger.info(`Verifying ${url}`);
     this.preVerifiedServers.set(url, priority);
-    let swarmSettings;
-    try {
-      swarmSettings = await this.getSwarmSettings(url);
-    } catch (error) {
-      this.logger.error('Unable to fetch swarm settings');
-      this.logger.errorStack(error);
-      return;
-    }
-    if (!swarmSettings) {
-      this.logger.error('Unable to fetch swarm settings');
-      return;
-    }
-    if (typeof this.readyCallback === 'function') {
-      this.isReady = true;
-      this.readyCallback();
-      delete this.readyCallback;
-    }
-    if (priority === 0) {
-      this.verifiedServers.set(url, 0);
-      this.throttledSaveVerifiedServers();
-    }
     let swarmKey;
     let hostnames;
     try {
@@ -252,28 +215,40 @@ export class BoltClient {
     } catch (error) {
       this.verifiedServers.delete(url);
       this.preVerifiedServers.delete(url);
-      this.logger.error('Unable to fetch Bolt swarm settings');
-      this.logger.errorStack(error);
-      return;
+      throw new BoltVerificationError(`Unable to fetch hostnames from ${url}`);
     }
     if (typeof swarmKey !== 'string') {
-      this.logger.error('Bolt hostnames request did not return swarm key');
-      return;
+      throw new BoltVerificationError(`Hostnames request to ${url} did not return swarm key`);
     }
     if (!Array.isArray(hostnames)) {
-      this.logger.error('Bolt hostnames request did not return hostnames array');
-      return;
+      throw new BoltVerificationError(`Hostnames request to ${url} did not return hostnames array`);
     }
-    if (swarmSettings.swarmKey !== swarmKey) {
-      this.logger.error(`Bolt swarm key does not match for ${url}`);
-      this.reset();
-      return;
+    if (typeof this.swarmKey === 'string') {
+      if (this.swarmKey !== swarmKey) {
+        this.reset();
+        throw new Error(`Swarm key does not match for ${url}`);
+      }
+    } else {
+      this.swarmKey = swarmKey;
     }
     const storedPriority = this.preVerifiedServers.get(url) || priority;
     this.verifiedServers.set(url, storedPriority);
     this.preVerifiedServers.delete(url);
+    if (hostnames && hostnames.length > 0) {
+      this.skipPriorityZeroServers = true;
+    }
     for (const hostname of hostnames) {
-      this.verifyServer(normalizeUrl(`https://${hostname}`), 2);
+      try {
+        await this.verifyServer(normalizeUrl(`https://${hostname}`), 2);
+      } catch (error) {
+        this.logger.error(`Unable to verify https://${hostname}`);
+        this.logger.errorStack(error);
+      }
+    }
+    if (typeof this.readyCallback === 'function') {
+      this.isReady = true;
+      this.readyCallback();
+      delete this.readyCallback;
     }
     this.throttledSaveVerifiedServers();
   }
