@@ -208,10 +208,12 @@ export class BoltClient {
     this.preVerifiedServers.set(url, priority);
     let swarmKey;
     let hostnames;
+    let ipRangeRoutes;
     try {
       const result = await superagent.get(`${url}/api/1.0/network-map/hostnames`);
       swarmKey = result.body.swarmKey;
       hostnames = result.body.hostnames;
+      ipRangeRoutes = !!result.body.ipRangeRoutes;
     } catch (error) {
       this.verifiedServers.delete(url);
       this.preVerifiedServers.delete(url);
@@ -234,7 +236,7 @@ export class BoltClient {
     const storedPriority = this.preVerifiedServers.get(url) || priority;
     this.verifiedServers.set(url, storedPriority);
     this.preVerifiedServers.delete(url);
-    if (hostnames && hostnames.length > 0) {
+    if (ipRangeRoutes || hostnames && hostnames.length > 0) {
       this.skipPriorityZeroServers = true;
     }
     for (const hostname of hostnames) {
