@@ -62,7 +62,7 @@ export class BoltClient {
   declare isReady: boolean;
   declare logger: Logger;
   declare swarmKey: string | void;
-  declare skipPriorityZeroServers: boolean;
+  declare skipPriorityOneServers: boolean;
 
   constructor() {
     this.seedServers = new Set();
@@ -78,16 +78,16 @@ export class BoltClient {
     this.isResetting = false;
     this.resetCount = 0;
     this.logger = baseLogger;
-    this.skipPriorityZeroServers = false;
+    this.skipPriorityOneServers = false;
   }
 
   getUrl(path:string) {
     if (this.verifiedServers.size > 0) {
-      if (!this.skipPriorityZeroServers || Math.max(...[...this.verifiedServers].map((x) => x[1])) !== 0) {
+      if (!this.skipPriorityOneServers || Math.max(...[...this.verifiedServers].map((x) => x[1])) > 1) {
         return new URL(path, chooseServer(this.verifiedServers)).toString();
       }
     }
-    if (!this.skipPriorityZeroServers) {
+    if (!this.skipPriorityOneServers) {
       if (this.seedServers.size > 0) {
         const urls = Array.from(this.seedServers);
         const url = urls[Math.floor(Math.random() * urls.length)];
@@ -237,7 +237,7 @@ export class BoltClient {
     this.verifiedServers.set(url, storedPriority);
     this.preVerifiedServers.delete(url);
     if (ipRangeRoutes || hostnames && hostnames.length > 0) {
-      this.skipPriorityZeroServers = true;
+      this.skipPriorityOneServers = true;
     }
     for (const hostname of hostnames) {
       try {
@@ -247,7 +247,7 @@ export class BoltClient {
         this.logger.errorStack(error);
       }
     }
-    if (typeof this.readyCallback === 'function') {
+    if (typeof this.readyCallback === 'function' && this.verifiedServers.size > 0 && (!this.skipPriorityOneServers || Math.max(...[...this.verifiedServers].map((x) => x[1])) > 1)) {
       this.isReady = true;
       this.readyCallback();
       delete this.readyCallback;
