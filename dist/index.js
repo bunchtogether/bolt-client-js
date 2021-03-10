@@ -101,13 +101,29 @@ export class BoltClient {
     if (this.isResetting === true) {
       return;
     }
-    if (this.resetCount > 5) {
-      this.logger.warn(`Bolt skipping reset after ${this.resetCount} attempts`);
+    this.resetCount += 1;
+    if (this.resetCount < 6) {
+      this.logger.warn(`Reset attempt ${this.resetCount}, waiting ${this.resetCount * this.resetCount} seconds`);
+      // $FlowFixMe
+      await Promise.any([
+        new Promise((resolve) => setTimeout(resolve, this.resetCount * this.resetCount * 1000)),
+        this.ready,
+      ]);
+    } else {
+      this.logger.warn(`Reset attempt ${this.resetCount}, waiting 30 seconds`);
+      // $FlowFixMe
+      await Promise.any([
+        await new Promise((resolve) => setTimeout(resolve, 30000)),
+        this.ready,
+      ]);
+    }
+    if (this.isReady) {
+      this.logger.warn('Bolt reset cancelled');
+      this.isResetting = false;
       return;
     }
     try {
       this.isResetting = true;
-      this.resetCount += 1;
       await AsyncStorage.removeItem('BOLT_SERVER_PRIORITY');
       this.preVerifiedServers = new Map();
       this.verifiedServers = new Map();
@@ -128,6 +144,9 @@ export class BoltClient {
       this.logger.errorStack(error);
     }
     this.isResetting = false;
+    if (!this.isReady) {
+      this.reset();
+    }
   }
 
   async loadStoredServers() {
@@ -150,6 +169,9 @@ export class BoltClient {
             this.logger.error(`Unable to verify ${url} (priority ${priority})`);
             this.logger.errorStack(error);
           }
+        }
+        if (this.preVerifiedServers.size === 0 && !this.isReady) {
+          this.reset();
         }
       }
     } catch (error) {
@@ -180,6 +202,9 @@ export class BoltClient {
     this.verifyServer(url, 0).catch((error) => {
       this.logger.error(`Unable to verify seed server ${url}`);
       this.logger.errorStack(error);
+      if (this.preVerifiedServers.size === 0 && !this.isReady) {
+        this.reset();
+      }
     });
   }
 
@@ -220,13 +245,21 @@ export class BoltClient {
       throw new BoltVerificationError(`Unable to fetch hostnames from ${url}`);
     }
     if (typeof swarmKey !== 'string') {
+      this.verifiedServers.delete(url);
+      this.preVerifiedServers.delete(url);
+      this.reset();
       throw new BoltVerificationError(`Hostnames request to ${url} did not return swarm key`);
     }
     if (!Array.isArray(hostnames)) {
+      this.verifiedServers.delete(url);
+      this.preVerifiedServers.delete(url);
+      this.reset();
       throw new BoltVerificationError(`Hostnames request to ${url} did not return hostnames array`);
     }
     if (typeof this.swarmKey === 'string') {
       if (this.swarmKey !== swarmKey) {
+        this.verifiedServers.delete(url);
+        this.preVerifiedServers.delete(url);
         this.reset();
         throw new Error(`Swarm key does not match for ${url}`);
       }
@@ -248,6 +281,7 @@ export class BoltClient {
       }
     }
     if (typeof this.readyCallback === 'function' && this.verifiedServers.size > 0 && (!this.skipPriorityOneServers || Math.max(...[...this.verifiedServers].map((x) => x[1])) > 1)) {
+      this.resetCount = 0;
       this.isReady = true;
       this.readyCallback();
       delete this.readyCallback;
