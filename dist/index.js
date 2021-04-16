@@ -6,6 +6,25 @@ import { debounce, shuffle } from 'lodash';
 import AsyncStorage from '@callstack/async-storage';
 import baseLogger from './logger';
 
+const any = (promises                    ) => new Promise(((resolve, reject) => {
+  let didResolve = false;
+  for (const promise of promises) {
+    promise.then(() => { // eslint-disable-line no-loop-func
+      if (didResolve) {
+        return;
+      }
+      didResolve = true;
+      resolve();
+    }).catch((error) => { // eslint-disable-line no-loop-func
+      if (didResolve) {
+        return;
+      }
+      didResolve = true;
+      reject(error);
+    });
+  }
+}));
+
 class BoltUrlError extends Error {}
 class BoltVerificationError extends Error {}
 
@@ -105,15 +124,15 @@ export class BoltClient {
     if (this.resetCount < 6) {
       this.logger.warn(`Reset attempt ${this.resetCount}, waiting ${this.resetCount * this.resetCount} seconds`);
       // $FlowFixMe
-      await Promise.any([
+      await any([
         new Promise((resolve) => setTimeout(resolve, this.resetCount * this.resetCount * 1000)),
         this.ready,
       ]);
     } else {
       this.logger.warn(`Reset attempt ${this.resetCount}, waiting 30 seconds`);
       // $FlowFixMe
-      await Promise.any([
-        await new Promise((resolve) => setTimeout(resolve, 30000)),
+      await any([
+        new Promise((resolve) => setTimeout(resolve, 30000)),
         this.ready,
       ]);
     }
