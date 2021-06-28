@@ -1,3 +1,30 @@
 {
-  "plugins": [["@babel/plugin-transform-flow-strip-types", {"allowDeclareFields": true}]]
+  "plugins": [
+    ["@babel/plugin-transform-flow-strip-types", {"allowDeclareFields": true}]
+  ],
+  "env": {
+    "esmBundled": {
+      "presets": [
+        ["@babel/env", { "targets": "> 0.25%, not dead"}]
+      ],
+    },
+    "cjs": {
+      "presets": [
+        ["@babel/env", { "modules": "commonjs", "targets": {"node": "current" }}]
+      ],
+      "exclude": "@babel/plugin-transform-regenerator"
+    },
+    "test": {
+      "presets": [
+        [
+          "@babel/preset-env",
+          {
+            "targets": {
+              "node": "current"
+            }
+          }
+        ]
+      ]
+    }
+  }
 }
