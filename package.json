@@ -4,8 +4,11 @@
   "main": "dist/index.cjs.js",
   "module": "dist/index.esm.js",
   "exports": {
-    "require": "./dist/index.cjs.js",
-    "import": "./dist/index.esm.js"
+    "./package.json": "./package.json",
+    ".": {
+      "require": "./dist/index.cjs.js",
+      "import": "./dist/index.esm.js"
+    }
   },
   "repository": "https://github.com/bunchtogether/bolt-client-js.git",
   "author": "johnwehr@bunchtogether.com",
