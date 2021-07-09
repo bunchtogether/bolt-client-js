@@ -1,4 +1,5 @@
 import Url from 'url-parse';
+import EventEmitter from 'events';
 import superagent from 'superagent';
 import { debounce, shuffle } from 'lodash';
 import AsyncStorage from '@callstack/async-storage';
@@ -123,8 +124,9 @@ const chooseServer = serverMap => {
 /**
  * Class representing a Bolt Client
  */
-export class BoltClient {
+export class BoltClient extends EventEmitter {
   constructor() {
+    super();
     this.seedServers = new Set();
     this.storedServers = new Set();
     this.preVerifiedServers = new Map();
@@ -176,15 +178,10 @@ export class BoltClient {
       await any([new Promise(resolve => setTimeout(resolve, 30000)), this.ready]);
     }
 
-    if (this.isReady) {
-      this.logger.warn('Bolt reset cancelled');
-      this.isResetting = false;
-      return;
-    }
-
     try {
       this.isResetting = true;
       await AsyncStorage.removeItem('BOLT_SERVER_PRIORITY');
+      delete this.clusterIdentifier;
       this.preVerifiedServers = new Map();
       this.verifiedServers = new Map();
       this.isReady = false;
@@ -280,6 +277,29 @@ export class BoltClient {
     });
   }
 
+  async reverifyServers() {
+    this.isReady = false;
+    this.ready = new Promise(resolve => {
+      this.readyCallback = () => resolve();
+    });
+    this.verifiedServers.clear();
+    const promises = [];
+
+    for (const url of this.seedServers) {
+      promises.push(this.verifyServer(url, 0).catch(error => {
+        this.logger.error(`Unable to re-verify seed server ${url}`);
+        this.logger.errorStack(error);
+      }));
+    }
+
+    promises.push(this.loadStoredServers());
+    await Promise.all(promises);
+
+    if (!this.isReady) {
+      throw new Error('Unable to re-verify servers');
+    }
+  }
+
   async verifyServer(url, priority) {
     const maxExistingPriority = Math.max(...this.verifiedServers.values());
 
@@ -311,13 +331,13 @@ export class BoltClient {
 
     this.logger.info(`Verifying ${url}`);
     this.preVerifiedServers.set(url, priority);
-    let swarmKey;
+    let clusterIdentifier;
     let hostnames;
     let ipRangeRoutes;
 
     try {
       const result = await superagent.get(`${url}/api/1.0/network-map/hostnames`);
-      swarmKey = result.body.swarmKey;
+      clusterIdentifier = result.body.publicKey || result.body.swarmKey;
       hostnames = result.body.hostnames;
       ipRangeRoutes = !!result.body.ipRangeRoutes;
     } catch (error) {
@@ -326,11 +346,11 @@ export class BoltClient {
       throw new BoltVerificationError(`Unable to fetch hostnames from ${url}`);
     }
 
-    if (typeof swarmKey !== 'string') {
+    if (typeof clusterIdentifier !== 'string') {
       this.verifiedServers.delete(url);
       this.preVerifiedServers.delete(url);
       this.reset();
-      throw new BoltVerificationError(`Hostnames request to ${url} did not return swarm key`);
+      throw new BoltVerificationError(`Hostnames request to ${url} did not return cluster identifier`);
     }
 
     if (!Array.isArray(hostnames)) {
@@ -340,15 +360,15 @@ export class BoltClient {
       throw new BoltVerificationError(`Hostnames request to ${url} did not return hostnames array`);
     }
 
-    if (typeof this.swarmKey === 'string') {
-      if (this.swarmKey !== swarmKey) {
+    if (typeof this.clusterIdentifier === 'string') {
+      if (this.clusterIdentifier !== clusterIdentifier) {
         this.verifiedServers.delete(url);
         this.preVerifiedServers.delete(url);
         this.reset();
         throw new Error(`Swarm key does not match for ${url}`);
       }
     } else {
-      this.swarmKey = swarmKey;
+      this.clusterIdentifier = clusterIdentifier;
     }
 
     const storedPriority = this.preVerifiedServers.get(url) || priority;
@@ -368,11 +388,15 @@ export class BoltClient {
       }
     }
 
-    if (typeof this.readyCallback === 'function' && this.verifiedServers.size > 0 && (!this.skipPriorityOneServers || Math.max(...[...this.verifiedServers].map(x => x[1])) > 1)) {
+    if (this.verifiedServers.size > 0 && (!this.skipPriorityOneServers || Math.max(...[...this.verifiedServers].map(x => x[1])) > 1)) {
       this.resetCount = 0;
       this.isReady = true;
-      this.readyCallback();
-      delete this.readyCallback;
+      this.emit('ready');
+
+      if (typeof this.readyCallback === 'function') {
+        this.readyCallback();
+        delete this.readyCallback;
+      }
     }
 
     this.throttledSaveVerifiedServers();
