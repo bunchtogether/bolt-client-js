@@ -1,6 +1,5 @@
 import Url from 'url-parse';
 import EventEmitter from 'events';
-import superagent from 'superagent';
 import { debounce, shuffle } from 'lodash';
 import AsyncStorage from '@callstack/async-storage';
 
@@ -336,10 +335,11 @@ export class BoltClient extends EventEmitter {
     let ipRangeRoutes;
 
     try {
-      const result = await superagent.get(`${url}/api/1.0/network-map/hostnames`);
-      clusterIdentifier = result.body.publicKey || result.body.swarmKey;
-      hostnames = result.body.hostnames;
-      ipRangeRoutes = !!result.body.ipRangeRoutes;
+      const response = await fetch(`${url}/api/1.0/network-map/hostnames`);
+      const body = await response.json();
+      clusterIdentifier = body.publicKey || body.swarmKey;
+      hostnames = body.hostnames;
+      ipRangeRoutes = !!body.ipRangeRoutes;
     } catch (error) {
       this.verifiedServers.delete(url);
       this.preVerifiedServers.delete(url);
