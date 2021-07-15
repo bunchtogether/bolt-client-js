@@ -13,6 +13,8 @@ var _lodash = require("lodash");
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
+const hasWindow = typeof window !== 'undefined';
+
 const log = (color, name, value, ...args) => {
   const label = `%c${name}: %c${value}`;
 
@@ -45,16 +47,16 @@ const log = (color, name, value, ...args) => {
 
 const baseLogger = {
   debug: (value, ...args) => {
-    log('blue', 'Bolt Client', value, ...args);
+    log('blue', hasWindow ? 'Bolt Client (Window)' : 'Bolt Client (Out of window)', value, ...args);
   },
   info: (value, ...args) => {
-    log('green', 'Bolt Client', value, ...args);
+    log('green', hasWindow ? 'Bolt Client (Window)' : 'Bolt Client (Out of window)', value, ...args);
   },
   warn: (value, ...args) => {
-    log('orange', 'Bolt Client', value, ...args);
+    log('orange', hasWindow ? 'Bolt Client (Window)' : 'Bolt Client (Out of window)', value, ...args);
   },
   error: (value, ...args) => {
-    log('red', 'Bolt Client', value, ...args);
+    log('red', hasWindow ? 'Bolt Client (Window)' : 'Bolt Client (Out of window)', value, ...args);
   },
   errorStack: error => {
     console.error(error); // eslint-disable-line no-console
@@ -136,6 +138,7 @@ const chooseServer = serverMap => {
 class BoltClient extends _events.default {
   constructor() {
     super();
+    this.pauseVerification = false;
     this.seedServers = new Set();
     this.storedServers = new Set();
     this.preVerifiedServers = new Map();
@@ -233,10 +236,16 @@ class BoltClient extends _events.default {
     this.getStoredServersCallbacks.push(getStoredServersCallback);
     this.saveStoredServersCallbacks.push(saveStoredServersCallback);
     this.clearStoredServersCallbacks.push(clearStoredServersCallback);
-    this.loadStoredServers();
+    setTimeout(() => {
+      this.loadStoredServers();
+    }, 0);
   }
 
   async loadStoredServers() {
+    if (this.pauseVerification) {
+      return;
+    }
+
     try {
       const allStoredServers = [];
 
@@ -313,6 +322,11 @@ class BoltClient extends _events.default {
     }
 
     this.seedServers.add(url);
+
+    if (this.pauseVerification) {
+      return;
+    }
+
     this.verifyServer(url, 0).catch(error => {
       this.logger.error(`Unable to verify seed server ${url}`);
       this.logger.errorStack(error);
@@ -323,12 +337,8 @@ class BoltClient extends _events.default {
     });
   }
 
-  async reverifyServers() {
-    this.isReady = false;
-    this.ready = new Promise(resolve => {
-      this.readyCallback = () => resolve();
-    });
-    this.verifiedServers.clear();
+  async verifyServers() {
+    this.pauseVerification = false;
     const promises = [];
 
     for (const url of this.seedServers) {
@@ -342,7 +352,49 @@ class BoltClient extends _events.default {
     await Promise.all(promises);
 
     if (!this.isReady) {
-      throw new Error('Unable to re-verify servers');
+      throw new Error('Unable to verify servers');
+    }
+  }
+
+  async reverifyServers() {
+    this.isReady = false;
+    this.ready = new Promise(resolve => {
+      this.readyCallback = () => resolve();
+    });
+    this.verifiedServers.clear();
+    await this.verifyServers();
+  }
+
+  setVerifiedServer(url, priority) {
+    this.emit('verifiedServer', url, priority);
+    this.verifiedServers.set(url, priority);
+    this.preVerifiedServers.delete(url);
+  }
+
+  setPreVerifiedServer(url, priority) {
+    this.emit('preVerifiedServer', url, priority);
+    this.preVerifiedServers.set(url, priority);
+  }
+
+  clearServer(url) {
+    this.emit('clearServer', url);
+    this.verifiedServers.delete(url);
+    this.preVerifiedServers.delete(url);
+  }
+
+  checkIsReady() {
+    if (this.verifiedServers.size > 0 && (!this.skipPriorityOneServers || Math.max(...[...this.verifiedServers].map(x => x[1])) > 1)) {
+      this.resetCount = 0;
+
+      if (!this.isReady) {
+        this.isReady = true;
+        this.emit('ready');
+
+        if (typeof this.readyCallback === 'function') {
+          this.readyCallback();
+          delete this.readyCallback;
+        }
+      }
     }
   }
 
@@ -358,7 +410,7 @@ class BoltClient extends _events.default {
 
     if (typeof verifiedServerPriority === 'number') {
       if (verifiedServerPriority < priority) {
-        this.verifiedServers.set(url, priority);
+        this.setVerifiedServer(url, priority);
         this.throttledSaveVerifiedServers();
       }
 
@@ -369,14 +421,14 @@ class BoltClient extends _events.default {
 
     if (typeof preVerifiedServerPriority === 'number') {
       if (preVerifiedServerPriority < priority) {
-        this.preVerifiedServers.set(url, priority);
+        this.setPreVerifiedServer(url, priority);
       }
 
       return false;
     }
 
     this.logger.info(`Verifying ${url}`);
-    this.preVerifiedServers.set(url, priority);
+    this.setPreVerifiedServer(url, priority);
     let clusterIdentifier;
     let hostnames;
     let ipRangeRoutes;
@@ -388,29 +440,25 @@ class BoltClient extends _events.default {
       hostnames = body.hostnames;
       ipRangeRoutes = !!body.ipRangeRoutes;
     } catch (error) {
-      this.verifiedServers.delete(url);
-      this.preVerifiedServers.delete(url);
+      this.clearServer(url);
       throw new BoltVerificationError(`Unable to fetch hostnames from ${url}`);
     }
 
     if (typeof clusterIdentifier !== 'string') {
-      this.verifiedServers.delete(url);
-      this.preVerifiedServers.delete(url);
+      this.clearServer(url);
       this.reset();
       throw new BoltVerificationError(`Hostnames request to ${url} did not return cluster identifier`);
     }
 
     if (!Array.isArray(hostnames)) {
-      this.verifiedServers.delete(url);
-      this.preVerifiedServers.delete(url);
+      this.clearServer(url);
       this.reset();
       throw new BoltVerificationError(`Hostnames request to ${url} did not return hostnames array`);
     }
 
     if (typeof this.clusterIdentifier === 'string') {
       if (this.clusterIdentifier !== clusterIdentifier) {
-        this.verifiedServers.delete(url);
-        this.preVerifiedServers.delete(url);
+        this.clearServer(url);
         this.reset();
         throw new Error(`Swarm key does not match for ${url}`);
       }
@@ -419,8 +467,7 @@ class BoltClient extends _events.default {
     }
 
     const storedPriority = this.preVerifiedServers.get(url) || priority;
-    this.verifiedServers.set(url, storedPriority);
-    this.preVerifiedServers.delete(url);
+    this.setVerifiedServer(url, storedPriority);
 
     if (ipRangeRoutes || hostnames && hostnames.length > 0) {
       this.skipPriorityOneServers = true;
@@ -435,17 +482,7 @@ class BoltClient extends _events.default {
       }
     }
 
-    if (this.verifiedServers.size > 0 && (!this.skipPriorityOneServers || Math.max(...[...this.verifiedServers].map(x => x[1])) > 1)) {
-      this.resetCount = 0;
-      this.isReady = true;
-      this.emit('ready');
-
-      if (typeof this.readyCallback === 'function') {
-        this.readyCallback();
-        delete this.readyCallback;
-      }
-    }
-
+    this.checkIsReady();
     this.throttledSaveVerifiedServers();
     return true;
   }
@@ -458,7 +495,7 @@ class BoltClient extends _events.default {
 exports.BoltClient = BoltClient;
 const bc = new BoltClient();
 
-if (typeof window !== 'undefined') {
+if (hasWindow) {
   window.boltClient = bc;
 }
 

@@ -4,6 +4,8 @@ import Url from 'url-parse';
 import EventEmitter from 'events';
 import { debounce, shuffle } from 'lodash';
 
+const hasWindow = typeof window !== 'undefined';
+
 type GetStoredServersCallback = () => Promise<Array<[string, number]>> | Array<[string, number]>;
 type SaveStoredServersCallback = (Array<[string, number]>) => Promise<void> | void;
 type ClearStoredServersCallback = () => Promise<void> | void;
@@ -34,16 +36,16 @@ const log = (color:string, name:string, value:string | number, ...args:Array<any
 
 const baseLogger = {
   debug: (value:string | number, ...args:Array<any>) => {
-    log('blue', 'Bolt Client', value, ...args);
+    log('blue', hasWindow ? 'Bolt Client (Window)' : 'Bolt Client (Out of window)', value, ...args);
   },
   info: (value:string | number, ...args:Array<any>) => {
-    log('green', 'Bolt Client', value, ...args);
+    log('green', hasWindow ? 'Bolt Client (Window)' : 'Bolt Client (Out of window)', value, ...args);
   },
   warn: (value:string | number, ...args:Array<any>) => {
-    log('orange', 'Bolt Client', value, ...args);
+    log('orange', hasWindow ? 'Bolt Client (Window)' : 'Bolt Client (Out of window)', value, ...args);
   },
   error: (value:string | number, ...args:Array<any>) => {
-    log('red', 'Bolt Client', value, ...args);
+    log('red', hasWindow ? 'Bolt Client (Window)' : 'Bolt Client (Out of window)', value, ...args);
   },
   errorStack: (error:Error | MediaError) => {
     console.error(error); // eslint-disable-line no-console
@@ -128,9 +130,11 @@ export class BoltClient extends EventEmitter {
   declare getStoredServersCallbacks: Array<GetStoredServersCallback>;
   declare saveStoredServersCallbacks: Array<SaveStoredServersCallback>;
   declare clearStoredServersCallbacks: Array<ClearStoredServersCallback>;
+  declare pauseVerification: boolean;
 
   constructor() {
     super();
+    this.pauseVerification = false;
     this.seedServers = new Set();
     this.storedServers = new Set();
     this.preVerifiedServers = new Map();
@@ -224,10 +228,15 @@ export class BoltClient extends EventEmitter {
     this.getStoredServersCallbacks.push(getStoredServersCallback);
     this.saveStoredServersCallbacks.push(saveStoredServersCallback);
     this.clearStoredServersCallbacks.push(clearStoredServersCallback);
-    this.loadStoredServers();
+    setTimeout(() => {
+      this.loadStoredServers();
+    }, 0);
   }
 
   async loadStoredServers() {
+    if (this.pauseVerification) {
+      return;
+    }
     try {
       const allStoredServers = [];
       for (const getStoredServersCallback of this.getStoredServersCallbacks) {
@@ -290,6 +299,9 @@ export class BoltClient extends EventEmitter {
       return;
     }
     this.seedServers.add(url);
+    if (this.pauseVerification) {
+      return;
+    }
     this.verifyServer(url, 0).catch((error) => {
       this.logger.error(`Unable to verify seed server ${url}`);
       this.logger.errorStack(error);
@@ -299,12 +311,8 @@ export class BoltClient extends EventEmitter {
     });
   }
 
-  async reverifyServers() {
-    this.isReady = false;
-    this.ready = new Promise((resolve) => {
-      this.readyCallback = () => resolve();
-    });
-    this.verifiedServers.clear();
+  async verifyServers() {
+    this.pauseVerification = false;
     const promises = [];
     for (const url of this.seedServers) {
       promises.push(this.verifyServer(url, 0).catch((error) => {
@@ -315,7 +323,47 @@ export class BoltClient extends EventEmitter {
     promises.push(this.loadStoredServers());
     await Promise.all(promises);
     if (!this.isReady) {
-      throw new Error('Unable to re-verify servers');
+      throw new Error('Unable to verify servers');
+    }
+  }
+
+  async reverifyServers() {
+    this.isReady = false;
+    this.ready = new Promise((resolve) => {
+      this.readyCallback = () => resolve();
+    });
+    this.verifiedServers.clear();
+    await this.verifyServers();
+  }
+
+  setVerifiedServer(url:string, priority:number) {
+    this.emit('verifiedServer', url, priority);
+    this.verifiedServers.set(url, priority);
+    this.preVerifiedServers.delete(url);
+  }
+
+  setPreVerifiedServer(url:string, priority:number) {
+    this.emit('preVerifiedServer', url, priority);
+    this.preVerifiedServers.set(url, priority);
+  }
+
+  clearServer(url:string) {
+    this.emit('clearServer', url);
+    this.verifiedServers.delete(url);
+    this.preVerifiedServers.delete(url);
+  }
+
+  checkIsReady() {
+    if (this.verifiedServers.size > 0 && (!this.skipPriorityOneServers || Math.max(...[...this.verifiedServers].map((x) => x[1])) > 1)) {
+      this.resetCount = 0;
+      if (!this.isReady) {
+        this.isReady = true;
+        this.emit('ready');
+        if (typeof this.readyCallback === 'function') {
+          this.readyCallback();
+          delete this.readyCallback;
+        }
+      }
     }
   }
 
@@ -328,7 +376,7 @@ export class BoltClient extends EventEmitter {
     const verifiedServerPriority = this.verifiedServers.get(url);
     if (typeof verifiedServerPriority === 'number') {
       if (verifiedServerPriority < priority) {
-        this.verifiedServers.set(url, priority);
+        this.setVerifiedServer(url, priority);
         this.throttledSaveVerifiedServers();
       }
       return false;
@@ -336,12 +384,12 @@ export class BoltClient extends EventEmitter {
     const preVerifiedServerPriority = this.preVerifiedServers.get(url);
     if (typeof preVerifiedServerPriority === 'number') {
       if (preVerifiedServerPriority < priority) {
-        this.preVerifiedServers.set(url, priority);
+        this.setPreVerifiedServer(url, priority);
       }
       return false;
     }
     this.logger.info(`Verifying ${url}`);
-    this.preVerifiedServers.set(url, priority);
+    this.setPreVerifiedServer(url, priority);
     let clusterIdentifier;
     let hostnames;
     let ipRangeRoutes;
@@ -352,26 +400,22 @@ export class BoltClient extends EventEmitter {
       hostnames = body.hostnames;
       ipRangeRoutes = !!body.ipRangeRoutes;
     } catch (error) {
-      this.verifiedServers.delete(url);
-      this.preVerifiedServers.delete(url);
+      this.clearServer(url);
       throw new BoltVerificationError(`Unable to fetch hostnames from ${url}`);
     }
     if (typeof clusterIdentifier !== 'string') {
-      this.verifiedServers.delete(url);
-      this.preVerifiedServers.delete(url);
+      this.clearServer(url);
       this.reset();
       throw new BoltVerificationError(`Hostnames request to ${url} did not return cluster identifier`);
     }
     if (!Array.isArray(hostnames)) {
-      this.verifiedServers.delete(url);
-      this.preVerifiedServers.delete(url);
+      this.clearServer(url);
       this.reset();
       throw new BoltVerificationError(`Hostnames request to ${url} did not return hostnames array`);
     }
     if (typeof this.clusterIdentifier === 'string') {
       if (this.clusterIdentifier !== clusterIdentifier) {
-        this.verifiedServers.delete(url);
-        this.preVerifiedServers.delete(url);
+        this.clearServer(url);
         this.reset();
         throw new Error(`Swarm key does not match for ${url}`);
       }
@@ -379,8 +423,7 @@ export class BoltClient extends EventEmitter {
       this.clusterIdentifier = clusterIdentifier;
     }
     const storedPriority = this.preVerifiedServers.get(url) || priority;
-    this.verifiedServers.set(url, storedPriority);
-    this.preVerifiedServers.delete(url);
+    this.setVerifiedServer(url, storedPriority);
     if (ipRangeRoutes || hostnames && hostnames.length > 0) {
       this.skipPriorityOneServers = true;
     }
@@ -392,15 +435,7 @@ export class BoltClient extends EventEmitter {
         this.logger.errorStack(error);
       }
     }
-    if (this.verifiedServers.size > 0 && (!this.skipPriorityOneServers || Math.max(...[...this.verifiedServers].map((x) => x[1])) > 1)) {
-      this.resetCount = 0;
-      this.isReady = true;
-      this.emit('ready');
-      if (typeof this.readyCallback === 'function') {
-        this.readyCallback();
-        delete this.readyCallback;
-      }
-    }
+    this.checkIsReady();
     this.throttledSaveVerifiedServers();
     return true;
   }
@@ -412,7 +447,7 @@ export class BoltClient extends EventEmitter {
 
 const bc = new BoltClient();
 
-if (typeof window !== 'undefined') {
+if (hasWindow) {
   window.boltClient = bc;
 }
 
