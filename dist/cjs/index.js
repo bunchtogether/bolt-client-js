@@ -1,7 +1,17 @@
-import Url from 'url-parse';
-import EventEmitter from 'events';
-import { debounce, shuffle } from 'lodash';
-import AsyncStorage from '@callstack/async-storage';
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports.default = exports.BoltClient = void 0;
+
+var _urlParse = _interopRequireDefault(require("url-parse"));
+
+var _events = _interopRequireDefault(require("events"));
+
+var _lodash = require("lodash");
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
 const log = (color, name, value, ...args) => {
   const label = `%c${name}: %c${value}`;
@@ -87,7 +97,7 @@ const normalizeUrl = s => {
     password,
     hostname,
     port
-  } = new Url(s);
+  } = new _urlParse.default(s);
   const result = [protocol || 'https:'];
 
   if (protocol && protocol.charAt(protocol.length - 1) !== ':') {
@@ -123,7 +133,7 @@ const chooseServer = serverMap => {
 /**
  * Class representing a Bolt Client
  */
-export class BoltClient extends EventEmitter {
+class BoltClient extends _events.default {
   constructor() {
     super();
     this.seedServers = new Set();
@@ -134,12 +144,19 @@ export class BoltClient extends EventEmitter {
     this.ready = new Promise(resolve => {
       this.readyCallback = () => resolve();
     });
-    this.throttledSaveVerifiedServers = debounce(this.saveVerifiedServers.bind(this), 1000);
-    this.loadStoredServers();
+    this.throttledSaveVerifiedServers = (0, _lodash.debounce)(this.saveVerifiedServers.bind(this), 1000);
     this.isResetting = false;
     this.resetCount = 0;
     this.logger = baseLogger;
     this.skipPriorityOneServers = false;
+    this.getStoredServersCallbacks = [];
+    this.saveStoredServersCallbacks = [];
+    this.clearStoredServersCallbacks = [];
+    this.ready.then(() => {
+      if (this.getStoredServersCallbacks.length === 0) {
+        this.logger.error('Missing stored server callbacks');
+      }
+    });
   }
 
   getUrl(path) {
@@ -179,7 +196,11 @@ export class BoltClient extends EventEmitter {
 
     try {
       this.isResetting = true;
-      await AsyncStorage.removeItem('BOLT_SERVER_PRIORITY');
+
+      for (const clearStoredServersCallback of this.clearStoredServersCallbacks) {
+        await clearStoredServersCallback();
+      }
+
       delete this.clusterIdentifier;
       this.preVerifiedServers = new Map();
       this.verifiedServers = new Map();
@@ -208,46 +229,72 @@ export class BoltClient extends EventEmitter {
     }
   }
 
+  addStoredServersCallbacks(getStoredServersCallback, saveStoredServersCallback, clearStoredServersCallback) {
+    this.getStoredServersCallbacks.push(getStoredServersCallback);
+    this.saveStoredServersCallbacks.push(saveStoredServersCallback);
+    this.clearStoredServersCallbacks.push(clearStoredServersCallback);
+    this.loadStoredServers();
+  }
+
   async loadStoredServers() {
     try {
-      const storedServersString = await AsyncStorage.getItem('BOLT_SERVER_PRIORITY');
+      const allStoredServers = [];
 
-      if (storedServersString) {
-        const storedServers = shuffle(JSON.parse(storedServersString));
-        storedServers.sort((x, y) => y[1] - x[1]);
+      for (const getStoredServersCallback of this.getStoredServersCallbacks) {
+        const storedServers = await getStoredServersCallback();
 
-        if (storedServers.length > 0) {
-          this.logger.info('Stored Bolt server addresses:');
+        for (const storedServer of (0, _lodash.shuffle)(storedServers)) {
+          allStoredServers.push(storedServer);
         }
+      }
 
-        for (const [url, priority] of storedServers) {
-          this.storedServers.add(url);
-          this.logger.info(`\t${url} (priority ${priority})`);
-        }
+      allStoredServers.sort((x, y) => y[1] - x[1]);
 
-        for (const [url, priority] of storedServers) {
-          try {
-            await this.verifyServer(url, priority);
-          } catch (error) {
-            this.logger.error(`Unable to verify ${url} (priority ${priority})`);
-            this.logger.errorStack(error);
+      if (allStoredServers.length > 0) {
+        this.logger.info('Stored Bolt server addresses:');
+      }
+
+      for (const [url, priority] of allStoredServers) {
+        this.storedServers.add(url);
+        this.logger.info(`\t${url} (priority ${priority})`);
+      }
+
+      let addedNewServers = false;
+
+      for (const [url, priority] of allStoredServers) {
+        try {
+          const isNewServer = await this.verifyServer(url, priority);
+
+          if (isNewServer) {
+            addedNewServers = true;
           }
+        } catch (error) {
+          this.logger.error(`Unable to verify ${url} (priority ${priority})`);
+          this.logger.errorStack(error);
         }
+      }
 
-        if (this.preVerifiedServers.size === 0 && !this.isReady) {
-          this.reset();
-        }
+      if (addedNewServers && this.preVerifiedServers.size === 0 && !this.isReady) {
+        this.logger.error('Server not ready after loading stored servers');
+        this.reset();
       }
     } catch (error) {
       this.logger.error('Unable to parse stored Bolt server addresses');
       this.logger.errorStack(error);
-      await AsyncStorage.removeItem('BOLT_SERVER_PRIORITY');
+
+      for (const clearStoredServersCallback of this.clearStoredServersCallbacks) {
+        await clearStoredServersCallback();
+      }
     }
   }
 
   async saveVerifiedServers() {
     try {
-      await AsyncStorage.setItem('BOLT_SERVER_PRIORITY', JSON.stringify([...this.verifiedServers].map(x => [x[0], x[1] === 0 ? 0 : 1])));
+      const storedServers = [...this.verifiedServers].map(x => [x[0], x[1] === 0 ? 0 : 1]);
+
+      for (const saveStoredServersCallback of this.saveStoredServersCallbacks) {
+        await saveStoredServersCallback(storedServers);
+      }
     } catch (error) {
       this.logger.error('Unable to save Bolt servers to local storage');
       this.logger.errorStack(error);
@@ -304,7 +351,7 @@ export class BoltClient extends EventEmitter {
 
     if (maxExistingPriority > priority) {
       this.logger.info(`Not verifying ${url}, verified server with priority ${maxExistingPriority} already exists`);
-      return;
+      return false;
     }
 
     const verifiedServerPriority = this.verifiedServers.get(url);
@@ -315,7 +362,7 @@ export class BoltClient extends EventEmitter {
         this.throttledSaveVerifiedServers();
       }
 
-      return;
+      return false;
     }
 
     const preVerifiedServerPriority = this.preVerifiedServers.get(url);
@@ -325,7 +372,7 @@ export class BoltClient extends EventEmitter {
         this.preVerifiedServers.set(url, priority);
       }
 
-      return;
+      return false;
     }
 
     this.logger.info(`Verifying ${url}`);
@@ -400,18 +447,21 @@ export class BoltClient extends EventEmitter {
     }
 
     this.throttledSaveVerifiedServers();
+    return true;
   }
 
   startIpfs() {// Noop
   }
 
 }
+
+exports.BoltClient = BoltClient;
 const bc = new BoltClient();
 
-if (window) {
+if (typeof window !== 'undefined') {
   window.boltClient = bc;
 }
 
-export default bc;
-
-//# sourceMappingURL=index.esm.js.map
+var _default = bc;
+exports.default = _default;
+//# sourceMappingURL=index.js.map
