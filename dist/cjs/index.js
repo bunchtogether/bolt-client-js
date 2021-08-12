@@ -9,7 +9,7 @@ var _urlParse = _interopRequireDefault(require("url-parse"));
 
 var _events = _interopRequireDefault(require("events"));
 
-var _lodash = require("lodash");
+var _debounce = _interopRequireDefault(require("lodash/debounce"));
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
@@ -140,14 +140,13 @@ class BoltClient extends _events.default {
     super();
     this.pauseVerification = false;
     this.seedServers = new Set();
-    this.storedServers = new Set();
-    this.preVerifiedServers = new Map();
     this.verifiedServers = new Map();
+    this.verifications = new Map();
     this.isReady = false;
     this.ready = new Promise(resolve => {
       this.readyCallback = () => resolve();
     });
-    this.throttledSaveVerifiedServers = (0, _lodash.debounce)(this.saveVerifiedServers.bind(this), 1000);
+    this.throttledSaveVerifiedServers = (0, _debounce.default)(this.saveVerifiedServers.bind(this), 1000);
     this.isResetting = false;
     this.resetCount = 0;
     this.logger = baseLogger;
@@ -205,21 +204,7 @@ class BoltClient extends _events.default {
       }
 
       delete this.clusterIdentifier;
-      this.preVerifiedServers = new Map();
-      this.verifiedServers = new Map();
-      this.isReady = false;
-      this.ready = new Promise(resolve => {
-        this.readyCallback = () => resolve();
-      });
-
-      for (const url of this.seedServers) {
-        try {
-          await this.verifyServer(url, 0);
-        } catch (error) {
-          this.logger.error(`Unable to verify seed server ${url}`);
-          this.logger.errorStack(error);
-        }
-      }
+      await this.reverifyServers();
     } catch (error) {
       this.logger.error('Error during Bolt client reset');
       this.logger.errorStack(error);
@@ -236,9 +221,39 @@ class BoltClient extends _events.default {
     this.getStoredServersCallbacks.push(getStoredServersCallback);
     this.saveStoredServersCallbacks.push(saveStoredServersCallback);
     this.clearStoredServersCallbacks.push(clearStoredServersCallback);
-    setTimeout(() => {
-      this.loadStoredServers();
-    }, 0);
+
+    if (this.pauseVerification) {
+      return;
+    }
+
+    const promiseOrStoredServers = getStoredServersCallback();
+
+    if (Array.isArray(promiseOrStoredServers)) {
+      this.verifyStoredServers(promiseOrStoredServers);
+    } else if (promiseOrStoredServers instanceof Promise) {
+      promiseOrStoredServers.then(storedServers => {
+        this.verifyStoredServers(storedServers);
+      }).catch(error => {
+        this.logger.error('Unable to load stored servers');
+        this.logger.errorStack(error);
+      });
+    }
+  }
+
+  verifyStoredServers(storedServers) {
+    if (storedServers.length === 0) {
+      return;
+    }
+
+    this.logger.info('Stored Bolt server addresses:');
+
+    for (const [url, priority] of storedServers) {
+      this.logger.info(`\t${url} (priority ${priority})`);
+      this.verifyServer(url, priority).catch(error => {
+        this.logger.error(`Unable to verify stored server ${url} (priority ${priority})`);
+        this.logger.errorStack(error);
+      });
+    }
   }
 
   async loadStoredServers() {
@@ -247,45 +262,9 @@ class BoltClient extends _events.default {
     }
 
     try {
-      const allStoredServers = [];
-
       for (const getStoredServersCallback of this.getStoredServersCallbacks) {
         const storedServers = await getStoredServersCallback();
-
-        for (const storedServer of (0, _lodash.shuffle)(storedServers)) {
-          allStoredServers.push(storedServer);
-        }
-      }
-
-      allStoredServers.sort((x, y) => y[1] - x[1]);
-
-      if (allStoredServers.length > 0) {
-        this.logger.info('Stored Bolt server addresses:');
-      }
-
-      for (const [url, priority] of allStoredServers) {
-        this.storedServers.add(url);
-        this.logger.info(`\t${url} (priority ${priority})`);
-      }
-
-      let addedNewServers = false;
-
-      for (const [url, priority] of allStoredServers) {
-        try {
-          const isNewServer = await this.verifyServer(url, priority);
-
-          if (isNewServer) {
-            addedNewServers = true;
-          }
-        } catch (error) {
-          this.logger.error(`Unable to verify ${url} (priority ${priority})`);
-          this.logger.errorStack(error);
-        }
-      }
-
-      if (addedNewServers && this.preVerifiedServers.size === 0 && !this.isReady) {
-        this.logger.error('Server not ready after loading stored servers');
-        this.reset();
+        this.verifyStoredServers(storedServers);
       }
     } catch (error) {
       this.logger.error('Unable to parse stored Bolt server addresses');
@@ -312,12 +291,9 @@ class BoltClient extends _events.default {
 
   addServer(s) {
     const url = normalizeUrl(s);
+    this.emit('addServer', url);
 
     if (this.seedServers.has(url)) {
-      return;
-    }
-
-    if (this.storedServers.has(url)) {
       return;
     }
 
@@ -330,37 +306,30 @@ class BoltClient extends _events.default {
     this.verifyServer(url, 0).catch(error => {
       this.logger.error(`Unable to verify seed server ${url}`);
       this.logger.errorStack(error);
-
-      if (this.preVerifiedServers.size === 0 && !this.isReady) {
-        this.reset();
-      }
     });
   }
 
   async verifyServers() {
     this.pauseVerification = false;
-    const promises = [];
 
     for (const url of this.seedServers) {
-      promises.push(this.verifyServer(url, 0).catch(error => {
-        this.logger.error(`Unable to re-verify seed server ${url}`);
+      this.verifyServer(url, 0).catch(error => {
+        this.logger.error(`Unable to verify seed server ${url}`);
         this.logger.errorStack(error);
-      }));
+      });
     }
 
-    promises.push(this.loadStoredServers());
-    await Promise.all(promises);
-
-    if (!this.isReady) {
-      throw new Error('Unable to verify servers');
-    }
+    await this.loadStoredServers();
+    await this.ready;
   }
 
   async reverifyServers() {
+    this.logger.warn('Re-verifying servers');
     this.isReady = false;
     this.ready = new Promise(resolve => {
       this.readyCallback = () => resolve();
     });
+    this.cancelVerifications();
     this.verifiedServers.clear();
     await this.verifyServers();
   }
@@ -368,18 +337,11 @@ class BoltClient extends _events.default {
   setVerifiedServer(url, priority) {
     this.emit('verifiedServer', url, priority);
     this.verifiedServers.set(url, priority);
-    this.preVerifiedServers.delete(url);
-  }
-
-  setPreVerifiedServer(url, priority) {
-    this.emit('preVerifiedServer', url, priority);
-    this.preVerifiedServers.set(url, priority);
   }
 
   clearServer(url) {
-    this.emit('clearServer', url);
     this.verifiedServers.delete(url);
-    this.preVerifiedServers.delete(url);
+    this.emit('clearServer', url);
   }
 
   checkIsReady() {
@@ -398,12 +360,30 @@ class BoltClient extends _events.default {
     }
   }
 
+  cancelVerification(url) {
+    const verification = this.verifications.get(url);
+
+    if (typeof verification === 'undefined') {
+      return;
+    }
+
+    this.verifications.delete(url);
+    verification[1].abort();
+  }
+
+  cancelVerifications() {
+    for (const url of this.verifications.keys()) {
+      this.cancelVerification(url);
+    }
+  }
+
   async verifyServer(url, priority) {
+    // const key = `${url}:${priority}`;
     const maxExistingPriority = Math.max(...this.verifiedServers.values());
 
     if (maxExistingPriority > priority) {
       this.logger.info(`Not verifying ${url}, verified server with priority ${maxExistingPriority} already exists`);
-      return false;
+      return;
     }
 
     const verifiedServerPriority = this.verifiedServers.get(url);
@@ -414,33 +394,78 @@ class BoltClient extends _events.default {
         this.throttledSaveVerifiedServers();
       }
 
-      return false;
+      return;
     }
 
-    const preVerifiedServerPriority = this.preVerifiedServers.get(url);
+    const activeVerification = this.verifications.get(url);
 
-    if (typeof preVerifiedServerPriority === 'number') {
-      if (preVerifiedServerPriority < priority) {
-        this.setPreVerifiedServer(url, priority);
+    if (Array.isArray(activeVerification)) {
+      const [activePriority] = activeVerification;
+
+      if (activePriority < priority) {
+        activeVerification[0] = priority;
       }
 
-      return false;
+      this.logger.info(`Not verifying ${url}, verification in progress`);
+      await activeVerification[2];
+      return;
     }
 
+    const abortController = new AbortController();
+    const timeout = setTimeout(() => {
+      abortController.abort();
+    }, 15000);
+    const verification = [priority, abortController, this._verifyServer(url, abortController.signal).then(() => {
+      // eslint-disable-line no-underscore-dangle
+      clearTimeout(timeout);
+
+      if (abortController.signal.aborted) {
+        this.logger.warn(`Unable to verify ${url}, verification aborted`);
+        return;
+      } // Use reference to verification object in case the priority is later changed
+
+
+      this.setVerifiedServer(url, verification[0]);
+      this.checkIsReady();
+      this.throttledSaveVerifiedServers();
+    }).catch(error => {
+      if (abortController.signal.aborted) {
+        this.logger.warn(`Unable to verify ${url}, verification aborted`);
+        return;
+      }
+
+      throw error;
+    }).finally(() => {
+      this.verifications.delete(url);
+    })];
+    this.verifications.set(url, verification);
+    await verification[2];
+  }
+
+  async _verifyServer(url, abortSignal) {
+    // eslint-disable-line no-underscore-dangle
     this.logger.info(`Verifying ${url}`);
-    this.setPreVerifiedServer(url, priority);
     let clusterIdentifier;
     let hostnames;
     let ipRangeRoutes;
 
     try {
-      const response = await fetch(`${url}/api/1.0/network-map/hostnames`);
+      const response = await fetch(`${url}/api/1.0/network-map/hostnames`, {
+        signal: abortSignal
+      });
+
+      if (!response.ok) {
+        const error = new Error(response.statusText);
+        throw error;
+      }
+
       const body = await response.json();
       clusterIdentifier = body.publicKey || body.swarmKey;
       hostnames = body.hostnames;
       ipRangeRoutes = !!body.ipRangeRoutes;
     } catch (error) {
       this.clearServer(url);
+      this.logger.errorStack(error);
       throw new BoltVerificationError(`Unable to fetch hostnames from ${url}`);
     }
 
@@ -460,31 +485,41 @@ class BoltClient extends _events.default {
       if (this.clusterIdentifier !== clusterIdentifier) {
         this.clearServer(url);
         this.reset();
-        throw new Error(`Swarm key does not match for ${url}`);
+        throw new BoltVerificationError(`Swarm key does not match for ${url}`);
       }
     } else {
       this.clusterIdentifier = clusterIdentifier;
     }
 
-    const storedPriority = this.preVerifiedServers.get(url) || priority;
-    this.setVerifiedServer(url, storedPriority);
-
     if (ipRangeRoutes || hostnames && hostnames.length > 0) {
       this.skipPriorityOneServers = true;
     }
 
+    if (abortSignal.aborted) {
+      return;
+    }
+
+    const promises = [];
+
     for (const hostname of hostnames) {
-      try {
-        await this.verifyServer(normalizeUrl(`https://${hostname}`), 2);
-      } catch (error) {
-        this.logger.error(`Unable to verify https://${hostname}`);
-        this.logger.errorStack(error);
+      if (url.includes(hostname)) {
+        const verification = this.verifications.get(url);
+
+        if (typeof verification === 'undefined') {
+          throw new Error('Unable to adjust priority, verification does not exist');
+        }
+
+        verification[0] = 2;
+      } else {
+        const newUrl = normalizeUrl(`https://${hostname}`);
+        promises.push(this.verifyServer(newUrl, 2).catch(error => {
+          this.logger.error(`Unable to verify ${newUrl} from hostnames in ${url}`);
+          this.logger.errorStack(error);
+        }));
       }
     }
 
-    this.checkIsReady();
-    this.throttledSaveVerifiedServers();
-    return true;
+    await Promise.all(promises);
   }
 
   startIpfs() {// Noop
