@@ -329,18 +329,25 @@ class BoltClient extends _events.default {
     this.ready = new Promise(resolve => {
       this.readyCallback = () => resolve();
     });
+    delete this.lastVerification;
     this.cancelVerifications();
     this.verifiedServers.clear();
     await this.verifyServers();
   }
 
   setVerifiedServer(url, priority) {
-    this.emit('verifiedServer', url, priority);
+    this.lastVerification = Date.now();
     this.verifiedServers.set(url, priority);
+    this.emit('verifiedServer', url, priority);
   }
 
   clearServer(url) {
     this.verifiedServers.delete(url);
+
+    if (this.verifiedServers.size === 0) {
+      delete this.lastVerification;
+    }
+
     this.emit('clearServer', url);
   }
 

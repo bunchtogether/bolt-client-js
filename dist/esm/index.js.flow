@@ -130,6 +130,7 @@ export class BoltClient extends EventEmitter {
   declare saveStoredServersCallbacks: Array<SaveStoredServersCallback>;
   declare clearStoredServersCallbacks: Array<ClearStoredServersCallback>;
   declare pauseVerification: boolean;
+  declare lastVerification: void | number;
 
   constructor() {
     super();
@@ -307,18 +308,23 @@ export class BoltClient extends EventEmitter {
     this.ready = new Promise((resolve) => {
       this.readyCallback = () => resolve();
     });
+    delete this.lastVerification;
     this.cancelVerifications();
     this.verifiedServers.clear();
     await this.verifyServers();
   }
 
   setVerifiedServer(url:string, priority:number) {
-    this.emit('verifiedServer', url, priority);
+    this.lastVerification = Date.now();
     this.verifiedServers.set(url, priority);
+    this.emit('verifiedServer', url, priority);
   }
 
   clearServer(url:string) {
     this.verifiedServers.delete(url);
+    if (this.verifiedServers.size === 0) {
+      delete this.lastVerification;
+    }
     this.emit('clearServer', url);
   }
 
