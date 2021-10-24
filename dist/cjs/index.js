@@ -3,7 +3,7 @@
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-exports.default = exports.BoltClient = void 0;
+exports.default = exports.BoltClient = exports.BoltVerificationFailedError = exports.BoltVerificationError = exports.BoltUrlError = void 0;
 
 var _urlParse = _interopRequireDefault(require("url-parse"));
 
@@ -87,9 +87,35 @@ const any = promises => new Promise((resolve, reject) => {
   }
 });
 
-class BoltUrlError extends Error {}
+class BoltUrlError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'BoltUrlError';
+  }
 
-class BoltVerificationError extends Error {}
+}
+
+exports.BoltUrlError = BoltUrlError;
+
+class BoltVerificationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'BoltVerificationError';
+  }
+
+}
+
+exports.BoltVerificationError = BoltVerificationError;
+
+class BoltVerificationFailedError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'BoltVerificationFailedError';
+  }
+
+}
+
+exports.BoltVerificationFailedError = BoltVerificationFailedError;
 
 const normalizeUrl = s => {
   const {
@@ -320,6 +346,11 @@ class BoltClient extends _events.default {
     }
 
     await this.loadStoredServers();
+
+    if (this.verifiedServers.size === 0 && this.verifications.size === 0) {
+      throw new BoltVerificationFailedError('Unable to verify servers, no server URLs available');
+    }
+
     await this.ready;
   }
 

@@ -71,8 +71,26 @@ const any = (promises:Array<Promise<any>>) => new Promise(((resolve, reject) => 
   }
 }));
 
-class BoltUrlError extends Error {}
-class BoltVerificationError extends Error {}
+export class BoltUrlError extends Error {
+  constructor(message:string) {
+    super(message);
+    this.name = 'BoltUrlError';
+  }
+}
+
+export class BoltVerificationError extends Error {
+  constructor(message:string) {
+    super(message);
+    this.name = 'BoltVerificationError';
+  }
+}
+
+export class BoltVerificationFailedError extends Error {
+  constructor(message:string) {
+    super(message);
+    this.name = 'BoltVerificationFailedError';
+  }
+}
 
 const normalizeUrl = (s:string) => {
   const { protocol, slashes, username, password, hostname, port } = new Url(s);
@@ -299,6 +317,9 @@ export class BoltClient extends EventEmitter {
       });
     }
     await this.loadStoredServers();
+    if (this.verifiedServers.size === 0 && this.verifications.size === 0) {
+      throw new BoltVerificationFailedError('Unable to verify servers, no server URLs available');
+    }
     await this.ready;
   }
 
