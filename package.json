@@ -85,6 +85,6 @@
   "dependencies": {
     "@callstack/async-storage": "^2.0.3",
     "lodash": "^4.17.21",
-    "url-parse": "^1.5.1"
+    "url-parse": "^1.5.6"
   }
 }
